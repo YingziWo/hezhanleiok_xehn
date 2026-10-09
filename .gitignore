@@ -1,20 +1,40 @@
-# 构建产物 (CI 会重新构建, sing-box.exe 由 workflow 下载嵌入)
-XiaoHeWarpScout.exe
-sing-box.exe
-build/bin/
+# Build output (rebuilt by pack.ps1 / go build, never committed)
+warp-client.exe
+warp-client-gui.exe
+/dist/
+*.zip
 
-# 运行时临时文件
-cache.db
-xhs-temp_proxy_*.json
-temp_proxy_*.json
+# Runtime state, preferences and credentials.
+# warpscout-account.json holds this device's WARP account private key: it must
+# never leave the machine it was registered on.
+warpscout-account.json
+state.json
+settings.json
+cache.json
+
+# Bundled third-party runtimes and their data (80+ MB of binaries, not sources).
+# core/client.config also carries real Psiphon service credentials.
+# Root-anchored on purpose: a bare "core/" would also hide internal/core/,
+# which is source.
+/core/
+/psiphon-data/
+
+# Logs
 *.log
 
-# 本机归档与导出 (不属于源码)
-_旧版本归档/
-导出配置/
-.dsh-vision-router/
+# Generated probe/test configs
+psiphon-test-config.yaml
+split-direct-test.yaml
+split-proxy-test.yaml
 
-# IDE/系统
+# Local module cache used for the offline build
+.gomod/
+
+# Internal engineering notes — deliberately not published
+PSIPHON_*.md
+*_AUDIT*.md
+
+# Editor / OS noise
+.warp-portable
 .DS_Store
 Thumbs.db
-warpscout-chain.exe
