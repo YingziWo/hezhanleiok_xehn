@@ -29,6 +29,11 @@ captures/
 .DS_Store
 Thumbs.db
 
+# 编辑器/命令留下的备份
+*.bak
+*.orig
+*.rej
+
 # Go
 engine/*.exe
 engine/*.test
