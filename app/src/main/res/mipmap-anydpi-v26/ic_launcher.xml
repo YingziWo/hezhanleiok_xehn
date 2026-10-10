@@ -1,0 +1,10 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<!--
+    鑷€傚簲鍥炬爣锛歠oreground 鏄鎺夌櫧杈瑰悗鐨勫崱鐗囷紝鎸夌敾甯?90% 鎽嗘斁銆?
+    鍚姩鍣ㄦ寜鑷繁鐨勫舰鐘惰鍓紝鍗＄墖鑷韩閭ｅ湀鐧借壊鍦嗚钀藉湪閬僵涔嬪锛屾墍浠ヤ笉浼氭湁
+    鍥涜鐧借竟锛沚ackground 鐢ㄤ笌鍗＄墖杈圭紭鍚岃壊绯荤殑娴呰摑鐧斤紝閬僵杈圭紭鑷劧琛旀帴銆?
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>
