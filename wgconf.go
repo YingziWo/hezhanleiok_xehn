@@ -638,9 +638,21 @@ func mihomoPeer(run protoRun, family string, host string, port int) ([]kv, error
 		// integer handshake ceiling, and its default leaves a dark edge
 		// hanging for tens of seconds. 5s is inside the 3-5s band that
 		// Gool.txt's P0 asks for, and it is verified against this core:
-		// `handshake-timeout` is the one masque knob it actually parses
+		// `handshake-timeout` is the connect-latency knob it actually parses
 		// (idle-timeout / keepalive are accepted but ignored).
-		return append(p, kv{"handshake-timeout", 5}), nil
+		//
+		// Throughput tuning for an exit carried inside this tunnel: QUIC
+		// defaults to CUBIC, and one lost datagram then costs both the outer
+		// window and the inner TCP retransmit, which is what pinned a
+		// VPN Gate exit to a few Mbps here. BBR rides out loss instead.
+		// The inner packets default to mihomo's minimal mips stack; the
+		// bundled core ships with_gvisor, whose TCP stack is the more
+		// complete of the two.
+		return append(p,
+			kv{"congestion-controller", "bbr"},
+			kv{"ip-stack", []kv{{"mode", "gvisor"}}},
+			kv{"handshake-timeout", 5},
+		), nil
 	}
 
 	// The single-peer fields mihomo still accepts at the top level are its legacy

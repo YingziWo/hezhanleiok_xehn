@@ -35,9 +35,9 @@ func TestVPNGatePickerTree(t *testing.T) {
 		t.Fatalf("country order = %q,%q; want JP,US", rows[1].cc, rows[6].cc)
 	}
 
-	// Residential first, then the measured unknown relay, then datacenter —
-	// class dominates, measured latency orders within a class.
-	wantIPs := []string{"198.51.100.2", "198.51.100.3", "198.51.100.1"}
+	// Residential first, then the datacenter relay. The old "unknown" cache
+	// value folds into residential, and measured latency orders that block.
+	wantIPs := []string{"198.51.100.3", "198.51.100.2", "198.51.100.1"}
 	for i, want := range wantIPs {
 		if got := rows[3+i].node.IP; got != want {
 			t.Fatalf("node row %d = %s, want %s", i, got, want)
@@ -45,8 +45,8 @@ func TestVPNGatePickerTree(t *testing.T) {
 	}
 
 	slots := map[string]string{
-		"198.51.100.2": "JP" + tr("家宽") + "01",
-		"198.51.100.3": "JP" + tr("未知") + "01",
+		"198.51.100.3": "JP" + tr("家宽") + "01",
+		"198.51.100.2": "JP" + tr("家宽") + "02",
 		"198.51.100.1": "JP" + tr("机房") + "01",
 	}
 	for ip, want := range slots {
@@ -61,11 +61,11 @@ func TestVPNGatePickerTree(t *testing.T) {
 		}
 	}
 
-	if got := vpnNodeLatencyLabel(rows[3].node); got != "自报 42ms" {
-		t.Fatalf("residential latency = %q", got)
-	}
-	if got := vpnNodeLatencyLabel(rows[4].node); got != "31ms" {
+	if got := vpnNodeLatencyLabel(rows[3].node); got != "31ms" {
 		t.Fatalf("measured latency = %q", got)
+	}
+	if got := vpnNodeLatencyLabel(rows[4].node); got != "自报 42ms" {
+		t.Fatalf("residential latency = %q", got)
 	}
 	if got := vpnNodeLatencyLabel(rows[5].node); got != "自报 88ms" {
 		t.Fatalf("datacenter latency = %q", got)
@@ -83,9 +83,6 @@ func TestVPNGatePickerTree(t *testing.T) {
 	}
 	if got := u.vpnClassColor("datacenter"); got != rx(138, 109, 59) {
 		t.Fatalf("datacenter colour = %v", got)
-	}
-	if got := u.vpnClassColor("unknown"); got != th.text {
-		t.Fatalf("unknown colour = %v, want text", got)
 	}
 
 	u.m.vpnExpanded = ""

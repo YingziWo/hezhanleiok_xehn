@@ -51,7 +51,7 @@ const (
 	verifyRetryDelay = 2 * time.Second
 	// openvpnMaxAttempts caps base-endpoint × relay combinations in one connect.
 	// A VPN Gate relay that cannot handshake is common; the candidates arrive
-	// already ordered (residential first, then unknown, then datacenter), so six
+	// already ordered (residential block first, then the datacenter fleet), so six
 	// attempts give the failover chain room without turning one connect into a
 	// multi-minute walk through dead nodes.
 	openvpnMaxAttempts = 6
@@ -1147,7 +1147,27 @@ func startAndVerify(ctx context.Context, opts options, ce cachedEndpoint, run pr
 		NoProxy:   opts.noProxy,
 		StartedAt: time.Now().Format(time.RFC3339),
 	}
-	// The exit IP may legitimately stay empty when both probe URLs geo-refuse
+	// The exit descriptor travels in state: health repair rebuilds the session
+	// from state.json alone, and without the relay it would silently drop the
+	// OpenVPN exit and reconnect to the bare underlay.
+	//
+	// It also carries the exit's own geo, because ce.Country/ce.Colo describe
+	// the WARP *carrier*. When the probe below only reaches an IP echo (VPN
+	// Gate exits occasionally cannot reach Cloudflare), leaving the carrier's
+	// country in place painted the underlay's flag on the home page while the
+	// exit was Thai.
+	if opts.openvpnMode && opts.openvpnNode != nil {
+		node := *opts.openvpnNode
+		state.OpenVPNMode = true
+		state.OpenVPNRegion = opts.openvpnRegion
+		state.OpenVPNNode = &node
+		if cc := strings.ToUpper(node.CountryShort); cc != "" {
+			state.Country = cc
+		}
+		state.Colo = ""
+		state.NodeCity = ""
+	}
+	// The exit IP may legitimately stay empty when every probe URL refuses
 	// this egress (CN nodes 403 speed.cloudflare.com): the round-trip itself
 	// proved the tunnel. The status loop keeps filling the fields in live.
 	state.ExitIP = probe.ExitIP
@@ -1159,15 +1179,6 @@ func startAndVerify(ctx context.Context, opts options, ce cachedEndpoint, run pr
 	}
 	if probe.NodeCity != "" {
 		state.NodeCity = probe.NodeCity
-	}
-	// The exit descriptor travels in state: health repair rebuilds the session
-	// from state.json alone, and without the relay it would silently drop the
-	// OpenVPN exit and reconnect to the bare underlay.
-	if opts.openvpnMode && opts.openvpnNode != nil {
-		node := *opts.openvpnNode
-		state.OpenVPNMode = true
-		state.OpenVPNRegion = opts.openvpnRegion
-		state.OpenVPNNode = &node
 	}
 
 	// Data plane proven — now, and only now, point the host at the tunnel.

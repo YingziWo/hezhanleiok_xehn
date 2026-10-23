@@ -253,7 +253,9 @@ func assertConfigShape(t *testing.T, cfg, proto string) {
 		common = append(common, "type: wireguard")
 	}
 	if strings.HasPrefix(proto, "masque") {
-		common = append(common, "type: masque")
+		// The transport tuning is part of the shape: dropping it silently
+		// returns MASQUE to CUBIC-over-mips and the exit's throughput with it.
+		common = append(common, "type: masque", "congestion-controller: bbr", "ip-stack:", "mode: gvisor")
 		if proto == "masque-h2" {
 			common = append(common, "network: h2")
 		}

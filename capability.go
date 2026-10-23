@@ -142,6 +142,9 @@ func probeYAML(proto string) (string, error) {
 			fmt.Fprintf(&b, "    sni: %s\n    private-key: %s\n    public-key: %s\n",
 				masqueSNI, base64.StdEncoding.EncodeToString(privDER), base64.StdEncoding.EncodeToString(pubDER))
 			fmt.Fprintf(&b, "    ip: %s\n    udp: true\n    remote-dns-resolve: true\n    dns: ['1.1.1.1']\n", ip)
+			// Same transport tuning mihomoPeer renders; a core without
+			// with_gvisor must fail here rather than at connect time.
+			b.WriteString("    congestion-controller: bbr\n    ip-stack:\n      mode: gvisor\n")
 			for _, e := range extra {
 				b.WriteString(e)
 			}

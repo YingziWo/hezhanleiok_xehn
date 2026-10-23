@@ -85,8 +85,9 @@ type vpnGateNode struct {
 	PingMS   int    `json:"ping_ms"`
 	Sessions int    `json:"sessions"`
 	Operator string `json:"operator"`
-	// Class is the offline classification (public-vpn-* is the author's
-	// datacenter fleet); the UI sorts unknown before datacenter.
+	// Class is the two-way line classification (residential or datacenter).
+	// public-vpn-* is the author's datacenter fleet; every other volunteer
+	// relay stays residential unless ip-api proves hosting.
 	Class   string `json:"class"`
 	Profile string `json:"profile"`
 	// LatencyMS is measured locally (through the WARP underlay when the list
@@ -102,36 +103,36 @@ func (n vpnGateNode) id() string {
 	return strings.ToLower(n.CountryShort) + "-" + n.IP + "-" + strconv.Itoa(n.Port)
 }
 
-// classKey folds "degraded" and every unrecognised value into "unknown" so the
-// slot counters group and number exactly like the phone client's classKeyOf.
+// classKey is the class the picker groups and numbers by, and it only ever
+// answers 家宽 or 机房. The host prefix is checked first because public-vpn-*
+// is the project author's own datacenter fleet; older caches may still carry it
+// as "unknown" (ip-api enrichment used to downgrade the offline prior), and
+// that host is authoritative either way. Everything not proven hosting is a
+// volunteer relay and stays residential - there is no third bucket to show.
 func (n vpnGateNode) classKey() string {
-	switch n.Class {
-	case "residential", "datacenter":
-		return n.Class
+	if strings.HasPrefix(strings.ToLower(n.HostName), "public-vpn") {
+		return "datacenter"
 	}
-	return "unknown"
+	if n.Class == "datacenter" {
+		return "datacenter"
+	}
+	return "residential"
 }
 
 // classTag is the short node-class label used in slot names (JP家宽01).
 func (n vpnGateNode) classTag() string {
-	switch n.classKey() {
-	case "residential":
-		return tr("家宽")
-	case "datacenter":
+	if n.classKey() == "datacenter" {
 		return tr("机房")
 	}
-	return tr("未知")
+	return tr("家宽")
 }
 
-// classRank is the phone client's order: residential, then unknown, then the
-// datacenter fleet. No class is ever hidden; the rank only decides which block
-// is tried first.
+// classRank is the display order: the residential block first, the datacenter
+// fleet second. No class is ever hidden; the rank only decides what is tried
+// first.
 func (n vpnGateNode) classRank() int {
-	switch n.classKey() {
-	case "residential":
+	if n.classKey() == "residential" {
 		return 0
-	case "datacenter":
-		return 2
 	}
 	return 1
 }
@@ -179,12 +180,23 @@ type ipAPIResult struct {
 	Hosting bool   `json:"hosting"`
 }
 
-// enrichClassify fills a node's class from the ip-api evidence. The order is
-// the phone client's: hard datacenter ASN, two datacenter signals, conflicting
-// signals, then residential. Anything else stays unknown — never call a
-// commercial line "residential", the label drives what the user picks.
+// enrichClassify resolves a node into one of the two classes from the ip-api
+// evidence. The public-vpn-* host prior is re-asserted before anything else:
+// ip-api reports those relays' ISP without a hosting flag, so the old
+// three-way code overwrote a conclusive datacenter prior with "unknown" and the
+// picker showed the author's own VPS fleet as unknown.
+//
+// Datacenter evidence is the hosting flag, a hard datacenter ASN, two
+// independent hosting signals, or a single hosting keyword that no consumer
+// brand or mobile network contradicts. Everything else is residential: the
+// VPN Gate pool is volunteer-run, and with no third label a line that cannot be
+// proven hosting is better shown as 家宽 than as a made-up datacenter.
 func enrichClassify(n *vpnGateNode, r ipAPIResult) {
 	if r.Status != "success" {
+		return
+	}
+	if strings.HasPrefix(strings.ToLower(n.HostName), "public-vpn") {
+		n.Class = "datacenter"
 		return
 	}
 	blob := strings.ToLower(strings.TrimSpace(r.ISP) + " " + r.Org + " " + r.AS)
@@ -200,19 +212,11 @@ func enrichClassify(n *vpnGateNode, r ipAPIResult) {
 		return
 	}
 	residential := containsAny(blob, residentialBrands) || r.Mobile
-	if dcGroups >= 2 || (dcGroups >= 1 && !residential) {
+	if dcGroups >= 2 || r.Hosting || (dcGroups >= 1 && !residential) {
 		n.Class = "datacenter"
 		return
 	}
-	if dcGroups >= 1 && residential {
-		n.Class = "unknown"
-		return
-	}
-	if residential {
-		n.Class = "residential"
-		return
-	}
-	n.Class = "unknown"
+	n.Class = "residential"
 }
 
 func parseASN(s string) int {
@@ -871,9 +875,12 @@ func parseVPNGateCSV(raw []byte) []vpnGateNode {
 		ping, _ := strconv.Atoi(strings.TrimSpace(rec[3]))
 		speed, _ := strconv.ParseInt(strings.TrimSpace(rec[4]), 10, 64)
 		sessions, _ := strconv.Atoi(strings.TrimSpace(rec[7]))
-		class := "unknown"
-		// VPN Gate's public-vpn-* relays are all the author's datacenter VPS;
-		// the offline pass can say that much without an ip-api round-trip.
+		// Default to residential and let ip-api promote to datacenter: the pool
+		// is volunteer-run home lines first, and the picker has no unknown
+		// bucket, so enrichment failure must not leave the label blank.
+		// public-vpn-* is the author's datacenter VPS fleet and needs no
+		// round-trip at all.
+		class := "residential"
 		if strings.HasPrefix(strings.ToLower(host), "public-vpn") {
 			class = "datacenter"
 		}
@@ -925,8 +932,8 @@ func sortVPNGateNodes(nodes []vpnGateNode) {
 //   - then the same country's other classes;
 //   - then abroad, same class first, then everything else.
 //
-// Without a pin, a country preference gets its own country (residential →
-// unknown → datacenter, latency inside each block) before abroad; auto mode
+// Without a pin, a country preference gets its own country (residential, then
+// datacenter, latency inside each block) before abroad; auto mode
 // orders the whole pool the same way. Nothing is ever excluded by class: the
 // rank only decides what is tried first.
 //
@@ -1319,9 +1326,9 @@ func measureVPNGateLatency(ctx context.Context, nodes []vpnGateNode) {
 	})
 }
 
-// sortVPNGateNodesByLatency is the picker's order, matching the phone client:
-// unknown nodes before the datacenter fleet, then measured latency, then the
-// API's own ping/score for anything the probe could not reach.
+// sortVPNGateNodesByLatency is the picker's order: the residential block before
+// the datacenter fleet, then measured latency, then the API's own ping/score
+// for anything the probe could not reach.
 func sortVPNGateNodesByLatency(nodes []vpnGateNode) {
 	sort.SliceStable(nodes, func(i, j int) bool {
 		a, b := nodes[i], nodes[j]

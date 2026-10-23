@@ -562,7 +562,7 @@ func (u *natUI) vpnPopupRows() []vpnPopupRow {
 }
 
 // vpnNodesIn is the per-country node list in the phone client's order: class
-// (residential/unknown before datacenter), then measured latency, then the API's
+// (residential before datacenter), then measured latency, then the API's
 // self-reported ping. The slice is a copy — the popup must not reorder the pool.
 func (u *natUI) vpnNodesIn(cc string) []vpnGateNode {
 	var out []vpnGateNode
@@ -771,8 +771,8 @@ func (u *natUI) vpnCountryPopupRow(c *walk.Canvas, x, y, w, h float64, co vpnGat
 }
 
 // vpnClassColor is the phone client's slot colour: residential green, the
-// datacenter fleet gold, unknown the ordinary text colour. Dark mode lightens
-// the two accents; the light values are the phone's own #1B7F3B / #8A6D3B.
+// datacenter fleet gold. Dark mode lightens the two accents; the light values
+// are the phone's own #1B7F3B / #8A6D3B.
 func (u *natUI) vpnClassColor(class string) walk.Color {
 	dark := darkNow(u.m.set)
 	switch class {

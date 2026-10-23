@@ -155,7 +155,25 @@ func saveState(s clientState) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0o600)
+	// Write-then-rename: the GUI reads this file every two seconds, and a
+	// truncate-then-write briefly exposes an empty/partial file. A parse error
+	// there used to blank the connected state for a whole poll (tile fell back
+	// to the LAN address, flag to the local region).
+	tmp, err := os.CreateTemp(filepath.Dir(p), ".state-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	_ = tmp.Chmod(0o600)
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, p)
 }
 
 // ensureAccount loads the cached account, or registers a fresh one when none
@@ -646,8 +664,13 @@ func geoDataReady() bool {
 // are not proof of anything, which is why all three failing is a failure.
 var dataPlaneSources = []string{
 	"https://speed.cloudflare.com/meta",
-	"https://www.cloudflare.com/cdn-cgi/trace",
+	// The IP echo sits before Cloudflare's trace on purpose: VPN Gate exits
+	// intermittently cannot reach Cloudflare at all, and the probe budget used
+	// to be spent entirely on the two Cloudflare sources before this one was
+	// tried. ipify answers with the exit IP, which is what the home tile needs;
+	// the trace only adds colo/city when Cloudflare is reachable.
 	"https://api.ipify.org",
+	"https://www.cloudflare.com/cdn-cgi/trace",
 }
 
 // probeTimeout bounds one source's round-trip. Deliberately short: with a dead

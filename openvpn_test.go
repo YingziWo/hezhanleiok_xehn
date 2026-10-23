@@ -211,24 +211,24 @@ func TestVPNGateCandidatesClassFailover(t *testing.T) {
 		}
 	}
 
-	// Residential pin: other JP residential (latency), JP unknown, JP datacenter,
-	// then abroad same class.
+	// Residential pin: other JP residential (legacy "unknown" included, latency
+	// order), then JP datacenter, then abroad same class.
 	check("residential pin",
 		vpnGateCandidates(ctx, nodes, "JP", nodes[1].id(), 24),
-		"203.0.113.11", "203.0.113.12", "203.0.113.13", "203.0.113.10", "203.0.113.14")
-	// Datacenter pin: no other JP datacenter, so JP residential → unknown, then
+		"203.0.113.11", "203.0.113.13", "203.0.113.12", "203.0.113.10", "203.0.113.14")
+	// Datacenter pin: no other JP datacenter, so the JP residential block, then
 	// abroad (same class first, none) and the rest.
 	check("datacenter pin",
 		vpnGateCandidates(ctx, nodes, "JP", nodes[0].id(), 24),
-		"203.0.113.10", "203.0.113.12", "203.0.113.11", "203.0.113.13", "203.0.113.14")
-	// Country only: the country's residential → unknown → datacenter before abroad.
+		"203.0.113.10", "203.0.113.13", "203.0.113.12", "203.0.113.11", "203.0.113.14")
+	// Country only: the country's residential block before its datacenter, then abroad.
 	check("country",
 		vpnGateCandidates(ctx, nodes, "JP", "", 24),
-		"203.0.113.12", "203.0.113.11", "203.0.113.13", "203.0.113.10", "203.0.113.14")
+		"203.0.113.13", "203.0.113.12", "203.0.113.11", "203.0.113.10", "203.0.113.14")
 	// Auto: one global class order, latency inside each block.
 	check("auto",
 		vpnGateCandidates(ctx, nodes, "", "", 24),
-		"203.0.113.14", "203.0.113.12", "203.0.113.11", "203.0.113.13", "203.0.113.10")
+		"203.0.113.13", "203.0.113.14", "203.0.113.12", "203.0.113.11", "203.0.113.10")
 }
 
 // TestVPNGateFailureMemory checks that a relay that just failed is skipped, and
@@ -331,8 +331,8 @@ func TestEnrichClassify(t *testing.T) {
 		{"mobile", ipAPIResult{Status: "success", ISP: "Some Wireless", Mobile: true}, "residential"},
 		{"hosting", ipAPIResult{Status: "success", ISP: "Some Hosting LLC", Hosting: true}, "datacenter"},
 		{"hard asn", ipAPIResult{Status: "success", ISP: "Quiet Network", AS: "AS9009"}, "datacenter"},
-		{"conflict", ipAPIResult{Status: "success", ISP: "Comcast Cable", Hosting: true}, "unknown"},
-		{"no signal", ipAPIResult{Status: "success", ISP: "Some Network"}, "unknown"},
+		{"conflict", ipAPIResult{Status: "success", ISP: "Comcast Cable", Hosting: true}, "datacenter"},
+		{"no signal", ipAPIResult{Status: "success", ISP: "Some Network"}, "residential"},
 	}
 	for _, c := range cases {
 		n := vpnGateNode{Class: "public-vpn-prior"}
@@ -345,6 +345,28 @@ func TestEnrichClassify(t *testing.T) {
 	enrichClassify(&n, ipAPIResult{Status: "fail"})
 	if n.Class != "datacenter" {
 		t.Fatalf("failed lookup must keep the offline prior, got %q", n.Class)
+	}
+	// ip-api reports the author's public relays without a hosting flag; the
+	// host prior must survive that inconclusive answer instead of turning into
+	// the old "unknown" label.
+	n = vpnGateNode{Class: "unknown", HostName: "public-vpn-184"}
+	enrichClassify(&n, ipAPIResult{Status: "success", ISP: "Daiyuu Nobori", Org: "Japan. Academic Use Only."})
+	if n.Class != "datacenter" {
+		t.Fatalf("public-vpn prior was overwritten: class = %q", n.Class)
+	}
+	// Whatever a cache written by an older version says, the picker only ever
+	// shows two labels.
+	for _, c := range []struct {
+		n    vpnGateNode
+		want string
+	}{
+		{vpnGateNode{HostName: "public-vpn-1", Class: "unknown"}, "datacenter"},
+		{vpnGateNode{HostName: "vpn123", Class: "unknown"}, "residential"},
+		{vpnGateNode{HostName: "vpn123", Class: "datacenter"}, "datacenter"},
+	} {
+		if got := c.n.classKey(); got != c.want {
+			t.Fatalf("classKey(%+v) = %q, want %q", c.n, got, c.want)
+		}
 	}
 	if got := parseASN("AS13335 "); got != 13335 {
 		t.Fatalf("parseASN = %d", got)

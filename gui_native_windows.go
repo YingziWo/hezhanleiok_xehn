@@ -211,6 +211,13 @@ type natUI struct {
 	// candidate - and two repairs at once means two sets of core kills,
 	// state writes and proxy changes interleaved on one session.
 	repairing atomic.Bool
+
+	// stateEpoch invalidates a status-loop tick that loaded state before a
+	// connect/disconnect/repair finished. Without it, an idle tick that was
+	// already probing the local network when a connect completed applied the
+	// stale connected:false snapshot last, and the freshly connected home page
+	// flipped back to the LAN IP and local flag until the next tick.
+	stateEpoch atomic.Int64
 }
 
 // s scales a length (width, height, radius) from the design grid to pixels.
@@ -524,6 +531,7 @@ func (u *natUI) statusLoop() {
 			return
 		case <-t.C:
 		}
+		epoch := u.stateEpoch.Load()
 		st, err := loadState()
 		if err != nil {
 			st = clientState{}
@@ -544,6 +552,15 @@ func (u *natUI) statusLoop() {
 			// connect itself verified makes them flicker off right after
 			// "Connected" appears.
 			exIP, cc, colo, city = st.ExitIP, st.Country, st.Colo, st.NodeCity
+			if st.OpenVPNMode && st.OpenVPNNode != nil {
+				// The relay is the egress; the carrier's WARP country is not.
+				// Older sessions saved that carrier country into Country, so
+				// the node's ISO code is the only trustworthy flag source.
+				if ncc := strings.ToUpper(st.OpenVPNNode.CountryShort); ncc != "" {
+					cc = ncc
+				}
+				colo, city = "", ""
+			}
 			if probe, perr := fetchSessionProbe(st.MixedPort, st.Family); perr == nil {
 				tunnelFails = 0
 				if probe.ExitIP != "" {
@@ -629,6 +646,7 @@ func (u *natUI) statusLoop() {
 					}
 					if ok {
 						u.sync(func() {
+							u.stateEpoch.Add(1)
 							u.m.status = newState
 							u.m.connected = true
 							u.addLog("已自动恢复：新端点 "+newState.Endpoint, false)
@@ -638,6 +656,7 @@ func (u *natUI) statusLoop() {
 					}
 					giveUp(logf)
 					u.sync(func() {
+						u.stateEpoch.Add(1)
 						u.m.connected = false
 						u.m.connecting = false
 						u.m.working = false
@@ -669,6 +688,17 @@ func (u *natUI) statusLoop() {
 			localTick++
 		}
 		u.sync(func() {
+			if u.stateEpoch.Load() != epoch {
+				// A connect/disconnect/repair landed while this tick was
+				// probing; its snapshot is older than the state already shown.
+				return
+			}
+			// Persist a relay-country correction once, so status/CLI and the
+			// next process agree with what the home page now shows.
+			if st.Connected && st.OpenVPNMode && cc != "" && st.Country != cc {
+				st.Country, st.Colo, st.NodeCity = cc, colo, city
+				_ = saveState(st)
+			}
 			st.ExitIP, st.Country, st.Colo, st.NodeCity = exIP, cc, colo, city
 			u.m.status = st
 			u.m.proxyBlocker = blocker
@@ -1327,6 +1357,7 @@ func (u *natUI) doConnect() {
 // its disconnect phase finished on the GUI thread).
 func (u *natUI) connectAsync() {
 	m := u.m
+	u.stateEpoch.Add(1)
 	u.persistSession()
 	o := defaultConnectOptions(m.proto, m.set.CaptureMode == captureTun, m.set.Rescan)
 	// Settings-page knobs ride on top of the session choices: ports, DNS,
@@ -1387,6 +1418,7 @@ func (u *natUI) connectAsync() {
 		err := runConnectCmd(u.ctx, o)
 		_ = pw.Close()
 		u.sync(func() {
+			u.stateEpoch.Add(1)
 			u.m.connecting = false
 			u.m.working = false
 			// Reflect the outcome immediately: leaving connected untouched here
@@ -1426,10 +1458,12 @@ func (u *natUI) connectStageHook(s string) {
 func (u *natUI) doDisconnect() {
 	// Not connecting: the button shows a busy "断开中" while working, so the
 	// connect animation/label must not appear for a disconnect.
+	u.stateEpoch.Add(1)
 	u.m.working = true
 	go func() {
 		err := runDisconnectCmd(u.ctx, options{mixedPort: core.DefaultMixedPort})
 		u.sync(func() {
+			u.stateEpoch.Add(1)
 			u.m.connecting = false
 			u.m.working = false
 			u.m.connected = false
@@ -1899,12 +1933,12 @@ func localLanIP() string {
 }
 
 // displayIP is what the home IP tile shows: the tunnel's exit once connected,
-// the machine's own LAN address before that.
+// the machine's own LAN address before that. While connected an empty exit IP
+// must stay empty rather than fall back to the LAN address - showing the
+// machine's own IP on a live tunnel is worse than showing a pending dash.
 func (u *natUI) displayIP() string {
 	if u.m.connected {
-		if ip := strings.TrimSpace(u.m.status.ExitIP); ip != "" {
-			return ip
-		}
+		return strings.TrimSpace(u.m.status.ExitIP)
 	}
 	if u.m.localLan != "" {
 		return u.m.localLan
@@ -1946,9 +1980,17 @@ func osRegionCC() string {
 }
 
 // displayGeo is the country/city pair under the IP: exit geo when connected,
-// the machine's public-IP geo while idle.
+// the machine's public-IP geo while idle. An OpenVPN session prefers the relay
+// node's own country over the stored one: the node is what the user picked and
+// what the exit IP belongs to, while the stored geo can still name the WARP
+// carrier until the next probe corrects it.
 func (u *natUI) displayGeo() (cc, city string) {
 	if u.m.connected {
+		if u.m.status.OpenVPNMode && u.m.status.OpenVPNNode != nil {
+			if ncc := strings.ToUpper(strings.TrimSpace(u.m.status.OpenVPNNode.CountryShort)); ncc != "" {
+				return ncc, u.m.status.NodeCity
+			}
+		}
 		return u.m.status.Country, u.m.status.NodeCity
 	}
 	return u.m.localCC, u.m.localCity
