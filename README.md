@@ -19,8 +19,8 @@ with an embedded Clash (mihomo) core for actual traffic routing.
 | Exit IP / latency / country display | ✅ live probe via mixed-port + cached scan meta |
 | Scan-result + account cache (TTL)   | ✅ `internal/cache` (6h TTL, JSON, survives reload) |
 | System-proxy mode (default)         | ✅ WinINET registry + `InternetSetOption` notify |
-| TUN global mode (optional)          | ✅ mihomo `tun:` block (needs admin + wintun) |
-| Native GUI (double-click portable)    | ✅ sidebar shell — Home/Nodes/Rules/Settings/Logs, light+dark theme, 中文/English |
+| TUN global mode (optional)          | ✅ mihomo `tun:` block (needs admin; wintun is embedded) |
+| Native GUI (double-click portable)    | ✅ sidebar shell — Home/Settings/About/Logs, light+dark theme, 中文/English |
 | Portable ZIP, core separated        | ✅ `pack.ps1` → v2rayN-style layout |
 | Core one-click download/update      | ✅ GitHub releases auto-provision |
 
@@ -72,10 +72,9 @@ appearance switches (theme, language) so neither needs a trip to settings:
 
 | page | contents |
 |---|---|
-| **Home** | connect/disconnect circle with the session clock, current exit (flag, colo, latency, up/down), protocol tiles with live core-capability state, selected node detail + live throughput chart |
-| **Nodes** | search, filter (all / working / starred), sort (latency / name), the cached scan results with latency bars, favourites (★) and paging — click a row to pin it |
-| **Rules** | proxy mode (global / rule / direct) + default node; split tunnelling (per-app, custom direct/proxy domains, region split); routing (TUN, system proxy, ports, address family, MTU) |
-| **Settings** | general (language, theme with live previews, remember last page), startup (autostart, auto-connect, rescan, auto-repair, timeout), proxy, DNS, about (versions, licences, updates, core) |
+| **Home** | connect/disconnect circle with the session clock, current exit (flag, colo, latency, up/down), protocol selector with live core-capability state, selected node detail + live throughput chart |
+| **Settings** | one page, four cards: capture (system proxy or VPN/TUN, local proxy port, LAN access, API port, address family with protocol gating, MTU), routing (proxy mode, default node, split tunnelling, domain lists, geo split), startup/behaviour (autostart, auto-connect, rescan, auto-repair, remember page, timeout), DNS & exit (presets, no-DNS, Psiphon + region) |
+| **About** | versions, data/core paths, licences, client and core updates |
 | **Logs** | run log (level-tagged console), connection history (the connect pipeline's own steps), diagnostics (copyable) |
 
 ![home](docs/screenshots/01-home-light.png)
@@ -119,9 +118,8 @@ warp-client (package main)            the warpscout engine (verbatim) +
 ├── gui_draw_windows.go ★            canvas primitives + widgets (cards, chips, switches)
 ├── gui_shell_windows.go ★           sidebar + page header + page routing
 ├── gui_page_home_windows.go ★       Home page
-├── gui_page_nodes_windows.go ★      Nodes page
-├── gui_page_rules_windows.go ★      Rules page (global / split / routing)
-├── gui_page_settings_windows.go ★   Settings page (general/startup/proxy/DNS/about)
+├── gui_page_nodes_windows.go ★      Nodes page (not in the sidebar; node choice is the Settings pin)
+├── gui_page_settings_windows.go ★   Settings page (capture / routing / startup / DNS & exit)
 ├── gui_page_logs_windows.go ★       Logs page (run / history / diagnostics)
 ├── gui_actions_windows.go ★         id → action routing, settings actions
 ├── gui_dialogs_windows.go ★         modal input/confirm, autostart, prefs plumbing
@@ -271,10 +269,8 @@ distribution** — that file is an engineering inventory, not a legal conclusion
 `--tun` adds a `tun:` block to the mihomo config and routes all traffic through
 a virtual interface instead of the system proxy. Requirements:
 
-- Run the client as **administrator** (elevated).
-- Place `wintun.dll` next to the mihomo core binary
-  (`%APPDATA%\warp-client\core\wintun.dll`), or let mihomo's gvisor stack
-  handle it (mihomo ≥ 1.18).
+- Run the client as **administrator** (elevated). The mihomo build this client
+  ships embeds wintun, so no extra `wintun.dll` is required.
 
 ## Tests
 

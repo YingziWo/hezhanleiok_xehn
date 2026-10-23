@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -111,6 +112,43 @@ func WaitClientOrCore(clientPID, corePID int) (clientDied bool, err error) {
 // but keeps running as a zombie), and the connect's readiness and tunnel
 // verification then get answered by the dying ghost — "connected" on screen,
 // dead port seconds later.
+// KillStaleCores terminates every process still running this exact core
+// binary and returns how many were killed. This is the recovery path after a
+// client dies without disconnecting (crash, Task Manager, AV termination): its
+// core keeps the mixed and API ports bound, and the next connect fails every
+// endpoint with "port still in use". state.json only remembers one PID and it
+// is not even written when the crash happens before the save, so the binary
+// path — which we know — is the reliable signature.
+func KillStaleCores(exe string) int {
+	want, err := filepath.Abs(exe)
+	if err != nil {
+		return 0
+	}
+	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return 0
+	}
+	defer windows.CloseHandle(snap)
+
+	var entry windows.ProcessEntry32
+	entry.Size = uint32(unsafe.Sizeof(entry))
+	killed := 0
+	for err = windows.Process32First(snap, &entry); err == nil; err = windows.Process32Next(snap, &entry) {
+		pid := int(entry.ProcessID)
+		if pid <= 0 || pid == os.Getpid() {
+			continue
+		}
+		// KillByPID re-checks the image path before touching the process, so a
+		// recycled PID is never killed by mistake.
+		if err := KillByPID(pid, want); err == nil {
+			if strings.EqualFold(syscall.UTF16ToString(entry.ExeFile[:]), filepath.Base(want)) {
+				killed++
+			}
+		}
+	}
+	return killed
+}
+
 func KillByPID(pid int, expectExe string) error {
 	if pid <= 0 {
 		return errors.New("core: kill: no pid")

@@ -154,6 +154,7 @@ const (
 	kindWWARP
 	kindMASQUE
 	kindMASQUEH2
+	kindMASQUEMASQUE
 )
 
 type protoRun struct {
@@ -167,6 +168,12 @@ const (
 	protoWWarp    = "wwarp"
 	protoMASQUE   = "masque"    // MASQUE over HTTP/3 (QUIC) — mihomo's default
 	protoMASQUEH2 = "masque-h2" // MASQUE over HTTP/2 (TCP)
+	// MASQUE in MASQUE (H3 in H3): one CONNECT-IP tunnel carried inside
+	// another. The inner hop dials from inside the outer one, so Cloudflare
+	// sees the outer edge and the inner tunnel gets its own exit address —
+	// Aether's --mim, expressed here as two masque outbounds chained with
+	// mihomo's dialer-proxy.
+	protoMASQUEMASQUE = "masque-mm"
 )
 
 func (r protoRun) isAWG() bool { return r.kind == kindAWG }
@@ -180,9 +187,17 @@ func (r protoRun) isWWARP() bool { return r.kind == kindWWARP }
 
 // Both MASQUE kinds run the same CONNECT-IP tunnel and differ only in the
 // transport underneath it, so everything that branches on "is this MASQUE"
-// stays one branch and only the transport asks isH2.
-func (r protoRun) isMASQUE() bool { return r.kind == kindMASQUE || r.kind == kindMASQUEH2 }
-func (r protoRun) isH2() bool     { return r.kind == kindMASQUEH2 }
+// stays one branch and only the transport asks isH2. masque-mm is MASQUE too:
+// each of its two hops is an ordinary CONNECT-IP tunnel, the inner one dialled
+// through the outer.
+func (r protoRun) isMASQUE() bool {
+	return r.kind == kindMASQUE || r.kind == kindMASQUEH2 || r.kind == kindMASQUEMASQUE
+}
+func (r protoRun) isH2() bool { return r.kind == kindMASQUEH2 }
+
+// isMASQUEMASQUE marks the nested pair. The render and the connect pipeline
+// treat it as "masque with an outer masque", never as a separate transport.
+func (r protoRun) isMASQUEMASQUE() bool { return r.kind == kindMASQUEMASQUE }
 
 var protoRuns = []protoRun{
 	{kindWG, protoWG},
@@ -190,6 +205,7 @@ var protoRuns = []protoRun{
 	{kindWWARP, protoWWarp},
 	{kindMASQUE, protoMASQUE},
 	{kindMASQUEH2, protoMASQUEH2},
+	{kindMASQUEMASQUE, protoMASQUEMASQUE},
 }
 
 func parseProto(p string) (protoRun, error) {
@@ -198,15 +214,46 @@ func parseProto(p string) (protoRun, error) {
 			return r, nil
 		}
 	}
-	return protoRun{}, fmt.Errorf("invalid -proto %q: use wg, awg, wwarp, masque or masque-h2", p)
+	return protoRun{}, fmt.Errorf("invalid -proto %q: use wg, awg, wwarp, masque, masque-h2 or masque-mm", p)
+}
+
+// protoV6Capable reports whether a protocol can carry IPv6 in the tunnel. The
+// two nested protocols cannot: their inner link MTU is 1220 bytes, below the
+// 1280-byte minimum an IPv6 packet needs, so v6 would handshake and blackhole.
+// protoChained reports whether a protocol is implemented as two nested
+// tunnels. Psiphon rides a single underlay, so it cannot be combined with these.
+func protoChained(p string) bool {
+	return p == protoWWarp || p == protoMASQUEMASQUE
+}
+
+func protoV6Capable(p string) bool {
+	switch p {
+	case protoWG, protoAWG, protoMASQUE, protoMASQUEH2:
+		return true
+	default:
+		return false
+	}
 }
 
 // protoLabel is the uppercase tag the connect pipeline stamps on every stage
 // log line ("[WG] Tunnel handshake succeeded"), keyed by the user-facing
 // protocol name (wwarp chains report as WARP-in-WARP, not as their carrier).
+// protoLabel is the protocol's name in stage logs and the state file, using the
+// same names the UI shows (GOOL for WARP-in-WARP).
 func protoLabel(p string) string {
-	if p == protoWWarp {
-		return "WARP-in-WARP"
+	switch p {
+	case protoWWarp:
+		return "GOOL"
+	case protoMASQUE:
+		return "MASQUE H3"
+	case protoMASQUEH2:
+		return "MASQUE H2"
+	case protoMASQUEMASQUE:
+		return "MASQUE in MASQUE"
+	case protoAWG:
+		return "AWG"
+	case protoWG:
+		return "WireGuard"
 	}
 	return strings.ToUpper(p)
 }

@@ -21,30 +21,83 @@ import (
 // Modal dialogs
 // ---------------------------------------------------------------------------
 
-// promptText shows a small modal input box and returns the entered text. It runs
-// on the GUI thread (actions always do), which is what walk's modal loop needs.
+// dialogSurface is the modal dialogs' background: the same near-white the
+// window's cards use, so a prompt looks like a piece of this app rather than a
+// bare Win32 box dropped on top of it.
+func dialogSurface() walk.Color { return rx(248, 249, 252) }
+
+// styleDialog gives a modal the app's icon and a caption tinted like the dialog
+// surface. The caller owns the returned icon and disposes it after the dialog.
+func styleDialog(dlg *walk.Dialog) *walk.Icon {
+	if dlg == nil {
+		return nil
+	}
+	styleDialogChrome(uintptr(dlg.Handle()))
+	src := logoImage()
+	if src == nil {
+		return nil
+	}
+	icon, err := walk.NewIconFromImage(resizeImage(src, 64, 64))
+	if err != nil {
+		return nil
+	}
+	_ = dlg.SetIcon(icon)
+	return icon
+}
+
+// promptText shows a modal input box and returns the entered text. It runs on
+// the GUI thread (actions always do), which is what walk's modal loop needs.
 func (u *natUI) promptText(title, hint, value string) (string, bool) {
+	return u.promptTextCheck(title, hint, value, nil)
+}
+
+// promptTextCheck is promptText with inline validation: a bad port or an
+// unparseable DNS address is reported inside the dialog and the dialog stays
+// open, instead of closing and answering only in the log panel.
+func (u *natUI) promptTextCheck(title, hint, value string, validate func(string) error) (string, bool) {
 	dlg, err := walk.NewDialogWithFixedSize(u.mw)
 	if err != nil {
 		u.addLog(tr("打开输入框失败")+": "+err.Error(), true)
 		return "", false
 	}
-	defer dlg.Dispose()
+	bg, _ := walk.NewSolidColorBrush(dialogSurface())
+	if bg != nil {
+		dlg.SetBackground(bg)
+	}
+	icon := styleDialog(dlg)
+	defer func() {
+		dlg.Dispose()
+		if icon != nil {
+			icon.Dispose()
+		}
+		if bg != nil {
+			bg.Dispose()
+		}
+	}()
 	dlg.SetTitle(title)
 
 	vbox := walk.NewVBoxLayout()
-	_ = vbox.SetMargins(walk.Margins{HNear: 16, VNear: 14, HFar: 16, VFar: 14})
+	_ = vbox.SetMargins(walk.Margins{HNear: 24, VNear: 18, HFar: 24, VFar: 16})
 	_ = vbox.SetSpacing(8)
 	if err := dlg.SetLayout(vbox); err != nil {
 		u.addLog(tr("输入框布局失败")+": "+err.Error(), true)
 		return "", false
 	}
 
+	// The caption already carries the title; the body only needs the hint, so
+	// the dialog does not say the same thing twice.
 	if hint != "" {
 		if lbl, lerr := walk.NewLabel(dlg); lerr == nil {
 			_ = lbl.SetText(hint)
+			lbl.SetTextColor(rx(96, 104, 120))
 		}
 	}
+	spacerLine, _ := walk.NewSpacerWithCfg(dlg, &walk.SpacerCfg{
+		LayoutFlags: walk.ShrinkableVert,
+		SizeHint:    walk.Size{Height: 4},
+	})
+	_ = spacerLine
+
 	le, err := walk.NewLineEdit(dlg)
 	if err != nil {
 		u.addLog(tr("输入框创建失败")+": "+err.Error(), true)
@@ -52,6 +105,16 @@ func (u *natUI) promptText(title, hint, value string) (string, bool) {
 	}
 	_ = le.SetText(value)
 	le.SetMaxLength(512)
+	le.SetTextColor(rx(28, 32, 40))
+	// One field width for every prompt: the dialog's width then depends on the
+	// app, not on how long the value happens to be.
+	_ = le.SetMinMaxSize(walk.Size{Width: 420, Height: 26}, walk.Size{Width: 420})
+
+	errLabel, _ := walk.NewLabel(dlg)
+	if errLabel != nil {
+		_ = errLabel.SetText(" ")
+		errLabel.SetTextColor(rx(198, 60, 60))
+	}
 
 	row, err := walk.NewComposite(dlg)
 	if err != nil {
@@ -62,6 +125,9 @@ func (u *natUI) promptText(title, hint, value string) (string, bool) {
 	_ = hbox.SetMargins(walk.Margins{})
 	_ = hbox.SetSpacing(8)
 	_ = row.SetLayout(hbox)
+	if sp, serr := walk.NewHSpacer(row); serr == nil {
+		_ = sp
+	}
 
 	ok, err := walk.NewPushButton(row)
 	if err != nil {
@@ -69,16 +135,32 @@ func (u *natUI) promptText(title, hint, value string) (string, bool) {
 		return "", false
 	}
 	_ = ok.SetText(tr("确定"))
+	_ = ok.SetMinMaxSize(walk.Size{Width: 92, Height: 30}, walk.Size{Width: 92, Height: 30})
 	cancel, err := walk.NewPushButton(row)
 	if err != nil {
 		u.addLog(tr("输入框创建失败")+": "+err.Error(), true)
 		return "", false
 	}
 	_ = cancel.SetText(tr("取消"))
+	_ = cancel.SetMinMaxSize(walk.Size{Width: 92, Height: 30}, walk.Size{Width: 92, Height: 30})
 	_ = dlg.SetDefaultButton(ok)
 	_ = dlg.SetCancelButton(cancel)
-	ok.Clicked().Attach(func() { dlg.Accept() })
+
+	submit := func() {
+		if validate != nil {
+			if verr := validate(le.Text()); verr != nil {
+				if errLabel != nil {
+					_ = errLabel.SetText("⚠ " + verr.Error())
+				}
+				le.SetFocus()
+				return
+			}
+		}
+		dlg.Accept()
+	}
+	ok.Clicked().Attach(submit)
 	cancel.Clicked().Attach(func() { dlg.Cancel() })
+	le.SetFocus()
 
 	if dlg.Run() != walk.DlgCmdOK {
 		return "", false
@@ -94,18 +176,33 @@ func (u *natUI) confirm(title, question string) bool {
 		u.addLog(tr("打开对话框失败")+": "+err.Error(), true)
 		return false
 	}
-	defer dlg.Dispose()
+	bg, _ := walk.NewSolidColorBrush(dialogSurface())
+	if bg != nil {
+		dlg.SetBackground(bg)
+	}
+	icon := styleDialog(dlg)
+	defer func() {
+		dlg.Dispose()
+		if icon != nil {
+			icon.Dispose()
+		}
+		if bg != nil {
+			bg.Dispose()
+		}
+	}()
 	dlg.SetTitle(title)
 
 	vbox := walk.NewVBoxLayout()
-	_ = vbox.SetMargins(walk.Margins{HNear: 16, VNear: 14, HFar: 16, VFar: 14})
-	_ = vbox.SetSpacing(10)
+	_ = vbox.SetMargins(walk.Margins{HNear: 24, VNear: 18, HFar: 24, VFar: 16})
+	_ = vbox.SetSpacing(8)
 	if err := dlg.SetLayout(vbox); err != nil {
 		return false
 	}
 	if lbl, lerr := walk.NewLabel(dlg); lerr == nil {
 		_ = lbl.SetText(question)
+		_ = lbl.SetMinMaxSize(walk.Size{Width: 420}, walk.Size{Width: 420})
 	}
+
 	row, err := walk.NewComposite(dlg)
 	if err != nil {
 		return false
@@ -114,17 +211,22 @@ func (u *natUI) confirm(title, question string) bool {
 	_ = hbox.SetMargins(walk.Margins{})
 	_ = hbox.SetSpacing(8)
 	_ = row.SetLayout(hbox)
+	if sp, serr := walk.NewHSpacer(row); serr == nil {
+		_ = sp
+	}
 
 	ok, err := walk.NewPushButton(row)
 	if err != nil {
 		return false
 	}
 	_ = ok.SetText(tr("确定"))
+	_ = ok.SetMinMaxSize(walk.Size{Width: 92, Height: 30}, walk.Size{Width: 92, Height: 30})
 	cancel, err := walk.NewPushButton(row)
 	if err != nil {
 		return false
 	}
 	_ = cancel.SetText(tr("取消"))
+	_ = cancel.SetMinMaxSize(walk.Size{Width: 92, Height: 30}, walk.Size{Width: 92, Height: 30})
 	_ = dlg.SetDefaultButton(ok)
 	_ = dlg.SetCancelButton(cancel)
 	ok.Clicked().Attach(func() { dlg.Accept() })
@@ -196,7 +298,9 @@ func mustCoreDir() string {
 
 // diagText is what the diagnostics button copies: everything needed to describe
 // this install without asking the user to hunt through folders.
-func (u *natUI) diagText() string {
+// diagHeader is the environment half of the diagnostic snapshot: versions,
+// paths and the recorded connection state.
+func (u *natUI) diagHeader() string {
 	dir, _ := appDir()
 	sp, _ := settingsPath()
 	cDir, _ := coreDir()
@@ -211,6 +315,13 @@ func (u *natUI) diagText() string {
 	if st, err := loadState(); err == nil {
 		b.WriteString("state: " + st.statusLine() + "\r\n")
 	}
+	return b.String()
+}
+
+// diagText is the full snapshot the copy action puts on the clipboard.
+func (u *natUI) diagText() string {
+	var b strings.Builder
+	b.WriteString(u.diagHeader())
 	for _, l := range u.m.logs {
 		b.WriteString("log " + l.at.Format("15:04:05") + " " + l.text + "\r\n")
 	}
@@ -268,12 +379,11 @@ func autoStartEnabled() bool {
 func (u *natUI) persistSession() {
 	m := u.m
 	m.set.Proto = m.proto
-	m.set.Tun = m.tun
-	m.set.Rescan = m.rescan
+	m.set.Pin = m.pin
 	m.set.Psiphon = m.psiphon
+	m.set.OpenVPN = m.openvpn
 	m.set.OuterProto = m.outerProto
 	m.set.InnerProto = m.innerProto
-	m.set.Page = m.page
 	if err := saveSettings(m.set); err != nil {
 		u.addLog(tr("设置保存失败: ")+err.Error(), true)
 	}
@@ -295,16 +405,6 @@ func (u *natUI) mutateSettings(fn func(*clientSettings)) {
 // ---------------------------------------------------------------------------
 // Small display helpers
 // ---------------------------------------------------------------------------
-
-// currentFamily maps the engine's boolean onto the address-family choice the
-// user sees: the flag has always meant "use the IPv6 endpoint pools instead of
-// the IPv4 ones", so it is a choice, not a switch that can be on independently.
-func currentFamily(v6 bool) string {
-	if v6 {
-		return "v6"
-	}
-	return "v4"
-}
 
 func guiBuildKind() string {
 	if windowsGUIBuild == "1" {

@@ -19,6 +19,12 @@ import (
 // scanInterface. Nil means the ordinary host-socket scan.
 var outer *nest
 
+// chainUserProto is the protocol the user actually picked for this connect
+// ("masque-mm" for a nested MASQUE pair, "wwarp" for WARP-in-WARP). A chain is
+// rendered as its carrier, so the state file — and the UI that reads it — needs
+// the original name to describe the session it just saved.
+var chainUserProto string
+
 type nest struct {
 	tunnel tunnel
 	net    *netstack.Net

@@ -9,11 +9,13 @@ import (
 )
 
 var logTabIDs = []string{"run", "conn", "debug"}
-var logTabLabels = []string{"运行日志", "连接记录", "调试信息"}
 
 func (u *natUI) paintLogs(c *walk.Canvas) {
-	x, y, w := shellContentX, shellBodyY, 1080-shellPadX-shellContentX
-	u.subtabs(c, x, y, "logtab:", logTabIDs, logTabLabels, u.m.logTab)
+	x, y, w := shellContentX, shellBodyY, u.contentW()
+	labels := []string{tr("运行日志"), tr("连接记录"), tr("调试信息")}
+	u.subtabs(c, x, y, "logtab:", logTabIDs, labels, u.m.logTab)
+	u.paintLogActions(c, x, y, w)
+
 	top := y + 46
 	switch u.m.logTab {
 	case "conn":
@@ -25,65 +27,102 @@ func (u *natUI) paintLogs(c *walk.Canvas) {
 	}
 }
 
-// paintRunLog is the console: newest at the bottom, one line per entry, level
-// tagged. Turning auto-scroll off freezes the view instead of silently dropping
-// lines, so what is on screen is always a real snapshot.
-func (u *natUI) paintRunLog(c *walk.Canvas, x, y, w float64) {
-	h := 700 - 14 - y
-	const footerH = 52.0
-	u.cardPlain(c, x, y, w, h)
-	u.fillRound(c, th.logBg, u.r(x+1, y+1, w-2, h-footerH), 11)
-
-	lines := u.m.logs
-	if !u.m.set.LogAutoScroll && len(u.m.frozenLogs) > 0 {
-		lines = u.m.frozenLogs
+// paintLogActions puts the tab's actions on the tab line itself, flush with the
+// card's right padding. The card below is then free for content on every tab.
+// Widths follow the label because the English strings are roughly twice as wide
+// as the Chinese ones and would otherwise overflow.
+func (u *natUI) paintLogActions(c *walk.Canvas, x, y, w float64) {
+	const btnH = 30.0
+	btnW := func(label string) float64 {
+		bw := chipWidth(label) + 8
+		if bw < 80 {
+			bw = 80
+		}
+		return bw
 	}
+	switch u.m.logTab {
+	case "conn":
+		return
+	case "debug":
+		specs := []struct {
+			id, label string
+			primary   bool
+		}{
+			{"about:copydiag", tr("复制诊断信息"), true},
+			{"about:opendata", tr("打开数据目录"), false},
+			{"upd:refresh", tr("重新探测内核"), false},
+		}
+		widths := make([]float64, len(specs))
+		total := 0.0
+		for i, s := range specs {
+			widths[i] = btnW(s.label)
+			total += widths[i]
+		}
+		bx := x + w - 16 - total - 8*float64(len(specs)-1)
+		for i, s := range specs {
+			enabled := true
+			if s.id == "upd:refresh" {
+				enabled = !u.m.coreBusy
+			}
+			u.button(c, bx, y, widths[i], btnH, s.id, s.label, s.primary, enabled)
+			bx += widths[i] + 8
+		}
+	default:
+		copyW := btnW(tr("复制"))
+		clearW := btnW(tr("清空日志"))
+		bx := x + w - 16 - copyW
+		u.button(c, bx, y, copyW, btnH, "logcopy", tr("复制"), false, len(u.m.logs) > 0)
+		bx -= 8 + clearW
+		u.button(c, bx, y, clearW, btnH, "logclear", tr("清空日志"), false, len(u.m.logs) > 0)
+	}
+}
 
-	const lineH = 21.0
-	rows := int((h - footerH - 20) / lineH)
+// paintRunLog is a light log reader: newest at the bottom, one line per entry,
+// level tagged. It shares the session list's card surface and text colours so
+// the two views read as one material, and it always follows the newest line.
+func (u *natUI) paintRunLog(c *walk.Canvas, x, y, w float64) {
+	h := 670 - y
+	u.cardPlain(c, x, y, w, h)
+
+	const lineH = 24.0
+	rows := int((h - 28) / lineH)
 	if rows < 1 {
 		rows = 1
 	}
+	lines := u.m.logs
 	if len(lines) > rows {
 		lines = lines[len(lines)-rows:]
 	}
 	if len(lines) == 0 {
 		u.textC(c, tr("暂无日志"), u.f.f9, th.faint, u.r(x+16, y+h/2-20, w-32, 20))
-	} else {
-		ly := y + 10
-		for _, l := range lines {
-			tag, col := "INFO", th.logText
-			switch {
-			case l.lv == 2:
-				tag, col = "ERR", rx(255, 122, 122)
-			case l.lv == 1:
-				tag, col = "WARN", rx(240, 185, 90)
-			}
-			if l.core {
-				col = rx(150, 165, 190)
-			}
-			u.txt(c, x+14, ly, 58, lineH, l.at.Format("15:04:05"), u.f.fmono, rx(122, 136, 158))
-			u.txt(c, x+76, ly, 44, lineH, tag, u.f.fmono, col)
-			u.txt(c, x+124, ly, w-150, lineH, l.text, u.f.fmono, col)
-			ly += lineH
-		}
+		return
 	}
-
-	// Footer: actions on the left, the scroll switch on the right.
-	fy := y + h - footerH
-	u.hline(c, x+16, fy, w-32, th.line)
-	u.button(c, x+16, fy+10, 96, 32, "logclear", tr("清空日志"), false, len(u.m.logs) > 0)
-	u.button(c, x+120, fy+10, 96, 32, "logcopy", tr("复制"), false, len(u.m.logs) > 0)
-	u.txt(c, x+w-16-160, fy+15, 84, 22, tr("自动滚动"), u.f.f9, th.dim)
-	u.switchAt(c, "set:logauto", x+w-16-44, fy+16, u.m.set.LogAutoScroll, true)
-	u.addSpot("set:logauto", u.r(x+w-64, fy+10, 48, 32), true)
+	ly := y + 14
+	for _, l := range lines {
+		// Core chatter stays identifiable by its tag instead of being faded out:
+		// it is the bulk of the log and has to remain readable.
+		tag, tagCol := "INFO", th.dim
+		msgCol := th.text
+		switch {
+		case l.lv == 2:
+			tag, tagCol, msgCol = "ERR", th.bad, th.bad
+		case l.lv == 1:
+			tag, tagCol, msgCol = "WARN", th.warn, th.warn
+		case l.core:
+			tag = "CORE"
+		}
+		u.txt(c, x+16, ly, 64, lineH, l.at.Format("15:04:05"), u.f.fmono, th.dim)
+		u.txt(c, x+86, ly, 52, lineH, tag, u.f.fmono, tagCol)
+		u.txt(c, x+144, ly, w-160, lineH, l.text, u.f.fmono, msgCol)
+		ly += lineH
+	}
 }
 
 // paintSessions shows only the connection pipeline's own lines: the connect
 // attempts, the endpoint chosen, and the disconnect. Core chatter is filtered
 // out, so this is a history of sessions rather than a dump.
 func (u *natUI) paintSessions(c *walk.Canvas, x, y, w float64) {
-	h := 700 - 14 - y
+	h := 670 - y
 	u.cardPlain(c, x, y, w, h)
 	var lines []natLog
 	for _, l := range u.m.logs {
@@ -118,30 +157,37 @@ func (u *natUI) paintSessions(c *walk.Canvas, x, y, w float64) {
 	}
 }
 
-// paintDebug is the copy-and-send block: paths, versions, the state line and
-// the tail of the log, in the exact form the diagnostics button copies.
+// paintDebug previews the support snapshot: the environment block first, then
+// the newest log lines. The full log lives on its own tab, so repeating all of
+// it here only made this tab a dimmer copy of that one.
 func (u *natUI) paintDebug(c *walk.Canvas, x, y, w float64) {
-	h := 700 - 14 - y
-	const footerH = 52.0
+	h := 670 - y
 	u.cardPlain(c, x, y, w, h)
-	u.fillRound(c, th.logBg, u.r(x+1, y+1, w-2, h-footerH), 11)
 
-	text := strings.TrimSpace(u.diagText())
-	const lineH = 19.0
-	rows := int((h - footerH - 20) / lineH)
-	lines := strings.Split(text, "\r\n")
+	const (
+		lineH = 24.0
+		pad   = 16.0
+	)
+	lines := strings.Split(strings.TrimSpace(u.diagHeader()), "\r\n")
+	rows := int((h - pad*2) / lineH)
 	if len(lines) > rows {
-		lines = lines[len(lines)-rows:]
+		lines = lines[:rows]
 	}
-	ly := y + 10
+	if room := rows - len(lines) - 1; room > 0 {
+		logs := u.m.logs
+		if len(logs) > room {
+			logs = logs[len(logs)-room:]
+		}
+		if len(logs) > 0 {
+			lines = append(lines, "")
+			for _, l := range logs {
+				lines = append(lines, "log "+l.at.Format("15:04:05")+" "+l.text)
+			}
+		}
+	}
+	ly := y + pad
 	for _, l := range lines {
-		u.txt(c, x+14, ly, w-30, lineH, l, u.f.fmono, th.logText)
+		u.txt(c, x+16, ly, w-32, lineH, l, u.f.fmono, th.text)
 		ly += lineH
 	}
-
-	fy := y + h - footerH
-	u.hline(c, x+16, fy, w-32, th.line)
-	u.button(c, x+16, fy+10, 120, 32, "about:copydiag", tr("复制诊断信息"), true, true)
-	u.button(c, x+144, fy+10, 100, 32, "about:opendata", tr("打开数据目录"), false, true)
-	u.button(c, x+252, fy+10, 120, 32, "upd:refresh", tr("重新探测内核"), false, !u.m.coreBusy)
 }

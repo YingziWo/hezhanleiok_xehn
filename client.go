@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -98,6 +99,8 @@ type clientState struct {
 	APIPort   int    `json:"api_port"`
 	CorePID   int    `json:"core_pid,omitempty"`
 	TUN       bool   `json:"tun"`
+	AllowLan  bool   `json:"allow_lan,omitempty"`
+	Family    string `json:"family,omitempty"`
 	StartedAt string `json:"started_at,omitempty"`
 	ProxySnap []byte `json:"proxy_snapshot,omitempty"`
 	// ProxyWarn records why the WinINET proxy edit failed while the tunnel
@@ -113,6 +116,15 @@ type clientState struct {
 	PsiphonMode      bool `json:"psiphon_mode,omitempty"`
 	PsiphonPID       int  `json:"psiphon_pid,omitempty"`
 	PsiphonSocksPort int  `json:"psiphon_socks_port,omitempty"`
+	// PsiphonRegion is the egress region this session's Psiphon was launched
+	// with ("" = automatic), so a guard restart rebuilds the same exit.
+	PsiphonRegion string `json:"psiphon_region,omitempty"`
+	// OpenVPN exit (V2): the relay this session exits through. The node carries
+	// its whole profile, so a guard repair can re-render the same tunnel even
+	// if the VPN Gate cache has rotated since the connect.
+	OpenVPNMode   bool         `json:"openvpn_mode,omitempty"`
+	OpenVPNRegion string       `json:"openvpn_region,omitempty"`
+	OpenVPNNode   *vpnGateNode `json:"openvpn_node,omitempty"`
 }
 
 func loadState() (clientState, error) {
@@ -348,11 +360,40 @@ func renderClientConfig(opts options, ce cachedEndpoint, run protoRun) ([]byte, 
 		proxyBody  string
 		egressName string
 		// baseName is non-empty exactly when the two-axis shape is rendered:
-		// Psiphon rides ON this base-protocol outbound, which carries Psiphon's
-		// own server dials. Empty means the legacy endpoint-less render.
+		// Psiphon/OpenVPN ride ON this base-protocol outbound, which carries
+		// their own dials. Empty means the legacy endpoint-less render.
 		baseName string
 	)
-	if opts.psiphonMode {
+	switch {
+	case opts.openvpnMode:
+		// V2 OpenVPN exit: the final egress is a VPN Gate relay rendered as
+		// mihomo's native openvpn outbound, dialled through the base protocol.
+		// A chain would need a third outbound and none of the VPN Gate relays
+		// is worth that complexity; the connect path refuses it, and this guard
+		// keeps a stale chain from producing an unparsable config.
+		if outer != nil {
+			return nil, fmt.Errorf("OpenVPN 出口不支持嵌套协议")
+		}
+		if opts.openvpnNode == nil {
+			return nil, fmt.Errorf("OpenVPN 出口缺少节点")
+		}
+		profile, perr := parseOVPNProfile(opts.openvpnNode.Profile)
+		if perr != nil {
+			return nil, fmt.Errorf("OpenVPN 节点配置无效: %w", perr)
+		}
+		endpoint := ce.Endpoint
+		if _, _, err := net.SplitHostPort(endpoint); err != nil {
+			endpoint = net.JoinHostPort(endpoint, strconv.Itoa(primaryWarpPorts[0]))
+		}
+		baseName = mihomoName(run)
+		base, err := mihomoProxy(renderOpts, baseName, endpoint, run, opts.mtu, confDNSList(opts))
+		if err != nil {
+			return nil, err
+		}
+		exit := append(mihomoOpenVPNProxy(profile), kv{"dialer-proxy", quoted(baseName)})
+		proxyBody = renderProxiesYAML([][]kv{base, exit})
+		egressName = mihomoOpenVPNName
+	case opts.psiphonMode:
 		// V1 Psiphon exit: the client's egress is Psiphon's localhost socks5,
 		// rendered alongside the base protocol that Psiphon dials its own
 		// servers through (without it Psiphon is a direct dial, which the
@@ -376,7 +417,7 @@ func renderClientConfig(opts options, ce cachedEndpoint, run protoRun) ([]byte, 
 				baseName += mihomoChainSuffix
 			}
 		}
-	} else {
+	default:
 		endpoint := ce.Endpoint
 		if _, _, err := net.SplitHostPort(endpoint); err != nil {
 			endpoint = net.JoinHostPort(endpoint, strconv.Itoa(primaryWarpPorts[0]))
@@ -401,19 +442,27 @@ func renderClientConfig(opts options, ce cachedEndpoint, run protoRun) ([]byte, 
 		// of whether mihomo can resolve the connecting process on this host.
 		fmt.Fprintf(&b, "socks-port: %d\n", underlaySocksPort(opts.mixedPort))
 	}
-	b.WriteString("allow-lan: false\n")
+	fmt.Fprintf(&b, "allow-lan: %t\n", opts.allowLan)
+	if opts.allowLan {
+		b.WriteString("bind-address: \"*\"\n")
+	}
 	fmt.Fprintf(&b, "mode: %s\n", mihomoMode(opts))
 	b.WriteString("log-level: info\n")
-	fmt.Fprintf(&b, "ipv6: %t\n", opts.ipv6)
-	if opts.splitActive() {
-		// Only resolved when a rule actually asks, which is exactly what the
-		// per-process rules below do - and only then is the (Windows) process
-		// lookup worth its cost.
-		b.WriteString("find-process-mode: strict\n")
-	}
+	fmt.Fprintf(&b, "ipv6: %t\n", opts.ipFamily() != famV4)
 	fmt.Fprintf(&b, "external-controller: 127.0.0.1:%d\n", opts.apiPort)
 	if dns := confDNSList(opts); len(dns) > 0 {
-		b.WriteString("dns:\n  enable: true\n  nameserver:\n")
+		b.WriteString("dns:\n  enable: true\n")
+		fmt.Fprintf(&b, "  ipv6: %t\n", opts.ipFamily() != famV4)
+		if dnsLeakProtected(opts) {
+			// Resolver queries follow the rule set, and the resolvers used to
+			// reach the proxy servers are declared separately. Without this,
+			// mihomo answers upstream directly even while traffic is proxied.
+			b.WriteString("  respect-rules: true\n  proxy-server-nameserver:\n")
+			for _, s := range dns {
+				fmt.Fprintf(&b, "    - %s\n", s)
+			}
+		}
+		b.WriteString("  nameserver:\n")
 		for _, s := range dns {
 			fmt.Fprintf(&b, "    - %s\n", s)
 		}
@@ -426,11 +475,26 @@ func renderClientConfig(opts options, ce cachedEndpoint, run protoRun) ([]byte, 
 	}
 	if opts.tunMode {
 		b.WriteString("tun:\n  enable: true\n  stack: gvisor\n  auto-route: true\n  auto-detect-interface: true\n")
+		if dnsLeakProtected(opts) {
+			// Covers applications that ignore the system resolver: their port
+			// 53 traffic enters the tunnel and is answered by mihomo instead
+			// of escaping to the local network's DNS.
+			b.WriteString("  dns-hijack:\n    - any:53\n")
+		}
 	}
 
 	b.WriteString("proxies:\n")
 	b.WriteString(proxyBody)
 	b.WriteString("\nproxy-groups:\n")
+	if opts.openvpnMode {
+		fmt.Fprintf(&b, "  - name: %s\n    type: select\n    proxies:\n      - %s\n", mihomoOpenVPNGroup, egressName)
+		b.WriteString("rules:\n")
+		for _, r := range routeRules(opts, mihomoOpenVPNGroup) {
+			fmt.Fprintf(&b, "  - %s\n", r)
+		}
+		fmt.Fprintf(&b, "  - MATCH,%s\n", routingFallback(opts, mihomoOpenVPNGroup))
+		return []byte(b.String()), nil
+	}
 	if opts.psiphonMode {
 		if baseName != "" {
 			fmt.Fprintf(&b, "  - name: %s\n    type: select\n    proxies:\n      - %s\n      - DIRECT\n", mihomoBaseGroup, baseName)
@@ -443,29 +507,19 @@ func renderClientConfig(opts options, ce cachedEndpoint, run protoRun) ([]byte, 
 			fmt.Fprintf(&b, "  - IN-TYPE,SOCKS,%s\n", mihomoBaseGroup)
 			fmt.Fprintf(&b, "  - PROCESS-NAME,psiphon.exe,%s\n", mihomoBaseGroup)
 		}
-		appRules, fallbackDirect := routeRules(opts, mihomoExitGroup)
-		for _, r := range appRules {
+		for _, r := range routeRules(opts, mihomoExitGroup) {
 			fmt.Fprintf(&b, "  - %s\n", r)
 		}
-		fallback := mihomoExitGroup
-		if fallbackDirect {
-			fallback = "DIRECT"
-		}
-		fmt.Fprintf(&b, "  - MATCH,%s\n", fallback)
+		fmt.Fprintf(&b, "  - MATCH,%s\n", routingFallback(opts, mihomoExitGroup))
 		return []byte(b.String()), nil
 	}
 	fmt.Fprintf(&b, "  - name: WARP\n    type: select\n    proxies:\n      - %s\n      - DIRECT\n", egressName)
 	fmt.Fprintf(&b, "  - name: auto\n    type: url-test\n    url: http://www.gstatic.com/generate_204\n    interval: 300\n    tolerance: 50\n    proxies:\n      - %s\n", egressName)
-	appRules, fallbackDirect := routeRules(opts, "WARP")
 	b.WriteString("rules:\n")
-	for _, r := range appRules {
+	for _, r := range routeRules(opts, "WARP") {
 		fmt.Fprintf(&b, "  - %s\n", r)
 	}
-	fallback := "WARP"
-	if fallbackDirect {
-		fallback = "DIRECT"
-	}
-	fmt.Fprintf(&b, "  - MATCH,%s\n", fallback)
+	fmt.Fprintf(&b, "  - MATCH,%s\n", routingFallback(opts, "WARP"))
 	return []byte(b.String()), nil
 }
 
@@ -483,28 +537,36 @@ func mihomoMode(o options) string {
 	return "rule"
 }
 
-// routeRules renders the rules the settings page describes, in the order the
-// page states: proxy domains, direct domains, per-app, then the region split.
-// It also reports whether un-matched traffic must fall back to DIRECT, which is
-// the only case where "matched traffic" and "the tunnel" are different sets
-// (per-app "only listed" mode).
-func routeRules(o options, egress string) (rules []string, fallbackDirect bool) {
-	if o.proxyMode == modeGlobal {
-		// "Global proxy" means no rules at all: everything goes to the exit.
-		return nil, false
+// dnsLeakProtected is the precondition for the DNS hardening block: there has
+// to be a resolver to send and a proxy path for it to follow.
+func dnsLeakProtected(o options) bool {
+	return o.dnsLeak && !o.noDNS && o.proxyMode != modeDirect
+}
+
+// routeRules renders the rules the selected preset describes. The order is
+// DNS-server routes, proxy domains, direct domains, then the region split;
+// blacklisted-only mode is the one preset whose fallback is DIRECT.
+func routeRules(o options, egress string) []string {
+	if o.proxyMode == modeGlobal || o.proxyMode == modeDirect {
+		// Everything goes to the exit (global) or the core bypasses every rule
+		// (direct): neither has a rule set of its own.
+		return nil
+	}
+	var rules []string
+	if dnsLeakProtected(o) {
+		rules = append(rules, dnsServerRules(o, egress)...)
 	}
 	for _, d := range o.domainProxy {
 		rules = append(rules, "DOMAIN-SUFFIX,"+d+","+egress)
 	}
-	for _, d := range o.domainDirect {
-		rules = append(rules, "DOMAIN-SUFFIX,"+d+",DIRECT")
+	if o.proxyMode != modeBlacklist {
+		// Blacklist mode's fallback is already DIRECT, so a direct-domain rule
+		// would be dead weight there; the field is disabled to match.
+		for _, d := range o.domainDirect {
+			rules = append(rules, "DOMAIN-SUFFIX,"+d+",DIRECT")
+		}
 	}
-	appRules, fb := splitRules(o, egress)
-	rules = append(rules, appRules...)
-	if fb == "DIRECT" {
-		fallbackDirect = true
-	}
-	if o.geoSplit && geoDataReady() {
+	if o.proxyMode == modeBypass && geoDataReady() {
 		// Mainland sites and IPs straight out; everything else through the
 		// exit. Emitted only when the data is on disk: mihomo tries to
 		// download geosite.dat when it is missing and then refuses the whole
@@ -514,53 +576,62 @@ func routeRules(o options, egress string) (rules []string, fallbackDirect bool) 
 			"GEOIP,CN,DIRECT",
 			"GEOSITE,geolocation-!cn,"+egress)
 	}
-	return rules, fallbackDirect
+	return rules
 }
 
-// geoDataReady reports whether the core's geo databases are on disk.
+// routingFallback is where unmatched traffic goes for each preset.
+func routingFallback(o options, egress string) string {
+	if o.proxyMode == modeBlacklist || o.proxyMode == modeDirect {
+		return "DIRECT"
+	}
+	return egress
+}
+
+// dnsServerRules pins the configured resolvers' own addresses to the tunnel.
+// respect-rules only routes the DNS *connection* by rules, so in blacklist mode
+// the MATCH,DIRECT fallback would otherwise send upstream queries out directly
+// and defeat the leak protection. Private resolvers stay direct - a LAN DNS box
+// is not reachable from the exit.
+func dnsServerRules(o options, egress string) []string {
+	var rules []string
+	for _, s := range confDNSList(o) {
+		addr, err := netip.ParseAddr(s)
+		if err != nil {
+			continue
+		}
+		target := egress
+		if addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsUnspecified() {
+			target = "DIRECT"
+		}
+		if addr.Is6() {
+			rules = append(rules, "IP-CIDR6,"+addr.String()+"/128,"+target)
+		} else {
+			rules = append(rules, "IP-CIDR,"+addr.String()+"/32,"+target)
+		}
+	}
+	return rules
+}
+
+// geoDataReady reports whether the geo databases the rules need are on disk.
+// GEOSITE and GEOIP are separate files; requiring both is what keeps a half
+// installed database from failing the whole config at load time.
 func geoDataReady() bool {
 	dir, err := coreDir()
 	if err != nil {
 		return false
 	}
-	for _, n := range []string{"geosite.dat", "geoip.metadb", "geoip.dat"} {
+	hasGeoSite := false
+	if _, err := os.Stat(filepath.Join(dir, "geosite.dat")); err == nil {
+		hasGeoSite = true
+	}
+	hasGeoIP := false
+	for _, n := range []string{"geoip.metadb", "geoip.dat"} {
 		if _, err := os.Stat(filepath.Join(dir, n)); err == nil {
-			return true
+			hasGeoIP = true
+			break
 		}
 	}
-	return false
-}
-
-// splitActive reports whether the per-process rules should be emitted at all.
-func (o options) splitActive() bool {
-	return o.splitMode != "" && o.splitMode != splitOff && len(o.splitApps) > 0
-}
-
-// splitRules renders the per-process split-tunnelling rules for the given
-// egress group and the MATCH fallback that must follow them. In splitProxy only
-// the listed apps may use the tunnel, so the fallback is DIRECT - otherwise
-// browsing from any unlisted program would silently ride the tunnel, which is
-// the opposite of what the user asked for. In splitDirect the listed apps
-// bypass it and the fallback stays the caller's own (empty string returned).
-func splitRules(o options, egress string) ([]string, string) {
-	if !o.splitActive() {
-		return nil, ""
-	}
-	rules := make([]string, 0, len(o.splitApps))
-	switch o.splitMode {
-	case splitProxy:
-		for _, app := range o.splitApps {
-			rules = append(rules, "PROCESS-NAME,"+app+","+egress)
-		}
-		return rules, "DIRECT"
-	case splitDirect:
-		for _, app := range o.splitApps {
-			rules = append(rules, "PROCESS-NAME,"+app+",DIRECT")
-		}
-		return rules, ""
-	default:
-		return nil, ""
-	}
+	return hasGeoSite && hasGeoIP
 }
 
 // dataPlaneSources are the URLs a data-plane probe proves itself with, tried in
@@ -624,7 +695,19 @@ func fetchExitProbe(mixedPort int) (clientState, error) {
 			}
 			break
 		}
-		resp, err := client.Get(u)
+		req, err := http.NewRequest(http.MethodGet, u, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		// speed.cloudflare.com/meta answers 403 (or an empty {}) without a
+		// Referer; every other /meta caller (fetchMeta, the speed test) sets
+		// metaReferer. Without it the primary source always refuses, so the
+		// probe could never populate colo/country/city from a live tunnel.
+		if strings.HasPrefix(u, "https://speed.cloudflare.com") {
+			req.Header.Set("Referer", metaReferer)
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			lastErr = err
 			continue
@@ -645,11 +728,19 @@ func fetchExitProbe(mixedPort int) (clientState, error) {
 			continue
 		}
 		proven = true
-		if m := parseMeta(raw); m.colo != "" {
+		m := parseMeta(raw)
+		if m.colo != "" {
 			out.Country, out.Colo, out.NodeCity = m.loc, m.colo, m.coloCity
 		}
-		if ip := traceField(raw, "ip"); ip != "" {
-			out.ExitIP = ip
+		if m.ip != "" {
+			// Cloudflare's meta body carries clientIp, so the primary source
+			// alone answers IP + colo + country and we can stop here.
+			out.ExitIP = m.ip
+		}
+		if out.ExitIP == "" {
+			if ip := traceField(raw, "ip"); ip != "" {
+				out.ExitIP = ip
+			}
 		}
 		if out.ExitIP == "" {
 			// ipify answers with the bare address as the whole body.
@@ -739,12 +830,29 @@ func fetchV6Probe(mixedPort int) (string, error) {
 	return "", fmt.Errorf("no IPv6 exit in trace reply")
 }
 
+// fetchSessionProbe probes a live session with a source its tunnel can reach:
+// v6-only sessions use the v6 literal, everything else the hostname sources.
+func fetchSessionProbe(mixedPort int, family string) (clientState, error) {
+	if family == famV6 {
+		ip, err := fetchV6Probe(mixedPort)
+		if err != nil {
+			return clientState{}, err
+		}
+		return clientState{ExitIP: ip}, nil
+	}
+	return fetchExitProbe(mixedPort)
+}
+
 // verifyTunnel is the data-plane gate between "the core process is listening"
 // and "Connected": a tunnel counts only after a real HTTPS round-trip through
 // the mixed port, an IPv6 round-trip when the config asked for v6, and an exit
 // IP query. logf receives one line per check so the GUI log can narrate the
 // state machine (Handshaking → Tunnel Ready → Data Plane Verification).
 func verifyTunnel(opts options, logf func(string)) (clientState, error) {
+	family := opts.ipFamily()
+	if family == famV6 {
+		return verifyTunnelV6Only(opts, logf)
+	}
 	logf("数据面验证：HTTPS 经隧道访问…")
 	probe, perr := fetchExitProbe(opts.mixedPort)
 	if perr != nil {
@@ -787,7 +895,7 @@ func verifyTunnel(opts options, logf func(string)) (clientState, error) {
 		logf("提示：DNS 复核服务不可用（" + derr.Error() + "）")
 	}
 
-	if opts.ipv6 {
+	if family != famV4 {
 		logf("数据面验证：IPv6 经隧道访问…")
 		if v6, err := fetchV6Probe(opts.mixedPort); err == nil {
 			logf("IPv6 数据面验证成功，出口 " + v6)
@@ -805,6 +913,36 @@ func verifyTunnel(opts options, logf func(string)) (clientState, error) {
 		logf("出口 IP: " + probe.ExitIP)
 	}
 	return probe, nil
+}
+
+// verifyTunnelV6Only is the v6-only gate. The shared probe sources are v4
+// hostnames, so a v6-only tunnel would fail them by design; the gate is a
+// request to a v6 literal instead, which exercises DNS-free IPv6 end to end.
+// Throughput is not re-probed here: the v6 trace round-trip already crossed the
+// tunnel with a real TLS payload, and the only v6-literal transfer available is
+// that same trace, so a second copy would measure nothing new.
+func verifyTunnelV6Only(opts options, logf func(string)) (clientState, error) {
+	logf("数据面验证：IPv6 经隧道访问…")
+	v6, err := fetchV6Probe(opts.mixedPort)
+	if err != nil {
+		// Same race as the v4 path: the first packet wakes the WG handshake.
+		time.Sleep(verifyRetryDelay)
+		logf("首次 IPv6 探测未通过，重试…")
+		v6, err = fetchV6Probe(opts.mixedPort)
+	}
+	if err != nil {
+		if derr := probeDNSTunnel(opts.mixedPort); derr != nil {
+			return clientState{}, fmt.Errorf("IPv6 请求超时/失败（且隧道内 DNS 不可用）: %w (DNS: %v)", err, derr)
+		}
+		return clientState{}, fmt.Errorf("IPv6 请求超时/失败（隧道内 DNS 正常）: %w", err)
+	}
+	logf("IPv6 数据面验证成功，出口 " + v6)
+	if derr := probeDNSTunnel(opts.mixedPort); derr == nil {
+		logf("DNS 数据面验证成功")
+	} else {
+		logf("提示：DNS 复核服务不可用（" + derr.Error() + "）")
+	}
+	return clientState{ExitIP: v6}, nil
 }
 
 // verifyPayloadBytes / verifyPayloadTimeout are the throughput floor the connect
@@ -971,6 +1109,10 @@ func sessionProtocolLabel(proto string) string {
 		return "MASQUEH3"
 	case protoMASQUEH2:
 		return "MASQUEH2"
+	case protoMASQUEMASQUE:
+		return "MASQUE-in-MASQUE"
+	case protoWWarp:
+		return "GOOL"
 	}
 	if proto == "" {
 		return "?"
@@ -987,7 +1129,24 @@ func (s clientState) sessionLabel() string {
 	if s.PsiphonMode {
 		label += "-Psiphon"
 	}
+	if s.OpenVPNMode {
+		label += "-OpenVPN"
+	}
 	return label
+}
+
+// relayRow is the VPN Gate relay in host:port (country) form, or "" for a
+// session without an OpenVPN exit. It is a helper because status prints the
+// relay in both of its layouts.
+func relayRow(s clientState) string {
+	if !s.OpenVPNMode || s.OpenVPNNode == nil {
+		return ""
+	}
+	id := s.OpenVPNNode.id()
+	if s.OpenVPNNode.CountryShort != "" {
+		id += " (" + s.OpenVPNNode.CountryShort + ")"
+	}
+	return id
 }
 
 // statusLine renders the human-readable one-line status shown by `status`.
@@ -1003,6 +1162,9 @@ func (s clientState) statusLine() string {
 	}
 	if s.ExitIP != "" {
 		parts = append(parts, "exit="+s.ExitIP)
+	}
+	if s.OpenVPNMode && s.OpenVPNNode != nil {
+		parts = append(parts, "relay="+s.OpenVPNNode.id())
 	}
 	if s.Country != "" {
 		parts = append(parts, "country="+s.Country)

@@ -24,18 +24,23 @@ func TestProbeConfigsAccepted(t *testing.T) {
 	}
 	dir := t.TempDir()
 	unsupported := map[string]string{}
+	names := make([]string, 0, len(protoRuns)+1)
 	for _, r := range protoRuns {
-		yaml, err := probeYAML(r.name)
+		names = append(names, r.name)
+	}
+	names = append(names, probeOpenVPNProto)
+	for _, name := range names {
+		yaml, err := probeYAML(name)
 		if err != nil {
-			unsupported[r.name] = "probeYAML: " + err.Error()
+			unsupported[name] = "probeYAML: " + err.Error()
 			continue
 		}
 		if err := core.TestConfig(bin, dir, []byte(yaml)); err != nil {
-			unsupported[r.name] = err.Error()
-			t.Logf("--- %s probe config ---\n%s", r.name, yaml)
+			unsupported[name] = err.Error()
+			t.Logf("--- %s probe config ---\n%s", name, yaml)
 			continue
 		}
-		t.Logf("%s: OK", r.name)
+		t.Logf("%s: OK", name)
 	}
 	if len(unsupported) > 0 {
 		for name, why := range unsupported {

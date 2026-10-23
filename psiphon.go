@@ -112,6 +112,10 @@ type psiphonLaunch struct {
 	BaseConfigPath string
 	Upstream       string
 	SocksPort      int
+	// EgressRegion is the ISO alpha-2 country the exit should be in; empty
+	// lets Psiphon pick automatically. It is a preference, not a guarantee —
+	// Psiphon falls back to any region when the requested one has no servers.
+	EgressRegion string
 }
 
 // psiphonV1Protocols is the TCP-only tunnel-protocol set V1 limits Psiphon to.
@@ -162,6 +166,10 @@ func buildPsiphonConfig(l psiphonLaunch) (map[string]any, error) {
 	// local SOCKS; empty means direct, which is blocked on the networks V1 targets.
 	cfg["UpstreamProxyUrl"] = l.Upstream
 	cfg["EmitDiagnosticNotices"] = true
+	// Exit region preference: empty means automatic (Psiphon's own default).
+	// Set unconditionally so a region chosen in the UI also overrides anything
+	// the base config happens to carry.
+	cfg["EgressRegion"] = strings.ToUpper(strings.TrimSpace(l.EgressRegion))
 	// Respect the base config's own protocol list when it has one; only fall back
 	// to the V1 TCP set when it does not. Overwriting a list the config already
 	// chose would silently overrule it — and can make Psiphon skip the faster

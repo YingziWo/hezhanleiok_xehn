@@ -16,6 +16,7 @@ const (
 	pageNodes    = "nodes"
 	pageRules    = "rules"
 	pageSettings = "settings"
+	pageAbout    = "about"
 	pageLogs     = "logs"
 )
 
@@ -32,12 +33,33 @@ const (
 	langEN = "en"
 )
 
-// Proxy modes, mapped straight onto the core's `mode:` field: everything
-// through the exit, rules decide, or nothing is proxied at all.
+// Routing presets. Four map onto rule sets around the exit; direct is the
+// core's own `mode: direct`. legacyModeRule is what the old "rule" choice was
+// called on disk and is migrated to custom when read.
 const (
-	modeGlobal = "global"
-	modeRule   = "rule"
-	modeDirect = "direct"
+	modeBypass     = "bypass"
+	modeBlacklist  = "blacklist"
+	modeGlobal     = "global"
+	modeDirect     = "direct"
+	modeCustom     = "custom"
+	legacyModeRule = "rule"
+)
+
+// Traffic capture: how applications reach the tunnel. The system proxy only
+// catches apps that honour WinINET; a TUN device routes the whole machine and
+// needs administrator rights (the core embeds wintun, so no extra DLL is needed).
+const (
+	captureProxy = "proxy"
+	captureTun   = "tun"
+)
+
+// Tunnel address families. v4 and v6 restrict the tunnel to one family; both
+// carries the two side by side. Nested protocols (wwarp, masque-mm) cannot use
+// anything but v4: their inner MTU is below IPv6's 1280-byte minimum.
+const (
+	famV4   = "v4"
+	famV6   = "v6"
+	famBoth = "both"
 )
 
 // clientSettings is the persisted preference set. It is deliberately separate
@@ -56,35 +78,51 @@ type clientSettings struct {
 	Proto      string `json:"proto"`
 	OuterProto string `json:"outer_proto"`
 	InnerProto string `json:"inner_proto"`
-	Tun        bool   `json:"tun"`
 	Rescan     bool   `json:"rescan"`
 	Psiphon    bool   `json:"psiphon"`
+	// OpenVPN is the V2 egress switch: a VPN Gate relay dialled from inside the
+	// base protocol. Mutually exclusive with Psiphon — both replace the final
+	// exit, and a session can only land in one place.
+	OpenVPN    bool   `json:"openvpn"`
 	AutoRepair bool   `json:"auto_repair"`
+	// PsiphonRegion is the preferred Psiphon exit country (ISO alpha-2, upper
+	// case). Empty means "automatic" — Psiphon picks the region itself.
+	PsiphonRegion string `json:"psiphon_region"`
+	// OpenVPNRegion is the preferred VPN Gate exit country (ISO alpha-2, upper
+	// case). Empty means "automatic" — the fastest reachable node wins.
+	OpenVPNRegion string `json:"openvpn_region"`
+	// OpenVPNNode pins one relay inside that country (country-ip-port, the same
+	// id the picker shows). Empty means "auto": the connect picks by latency.
+	OpenVPNNode string `json:"openvpn_node"`
+	// Pin is the endpoint the user picked as the default node; empty means the
+	// fastest cached endpoint wins.
+	Pin string `json:"pin"`
 
-	// Local proxy: where clients point, and where the core's API listens.
+	// Local proxy: where clients point, where the core's API listens, and
+	// whether other devices on the LAN may use the mixed port.
 	MixedPort   int  `json:"mixed_port"`
 	APIPort     int  `json:"api_port"`
-	SystemProxy bool `json:"system_proxy"`
+	AllowLan    bool `json:"allow_lan"`
+	CaptureMode string `json:"capture_mode"`
 
-	// Network.
-	IPv6       bool `json:"ipv6"`
-	MTU        int  `json:"mtu"`
-	TimeoutSec int  `json:"timeout_sec"`
+	// Network. IPFamily is the tunnel's address family (v4/v6/both); it is
+	// separate from the endpoint scan family, which only ever asks whether the
+	// cached endpoint pool is v4 or v6.
+	IPFamily   string `json:"ip_family"`
+	MTU        int    `json:"mtu"`
+	TimeoutSec int    `json:"timeout_sec"`
 
 	// DNS: DNSCustom is a comma separated resolver list (empty = not set);
-	// DNSOff stops the client from handing any resolver to the tunnel at all.
+	// DNSOff stops the client from handing any resolver to the tunnel at all;
+	// DNSLeak routes resolver queries through the tunnel and, in TUN mode,
+	// hijacks every port-53 packet so no query escapes outside the tunnel.
 	DNSCustom string `json:"dns_custom"`
 	DNSOff    bool   `json:"dns_off"`
+	DNSLeak   bool   `json:"dns_leak"`
 
-	// Split tunnelling: SplitMode is splitOff / splitProxy (only the listed
-	// apps use the tunnel) / splitDirect (the listed apps bypass it). SplitApps
-	// holds process names, e.g. "chrome.exe, steam.exe".
-	SplitMode string `json:"split_mode"`
-	SplitApps string `json:"split_apps"`
-
-	// ProxyMode decides what the rules below are for: modeGlobal sends
-	// everything to the exit (no rules at all), modeRule honours them, and
-	// modeDirect bypasses the proxy entirely.
+	// ProxyMode is the routing preset: bypass (mainland direct, rest proxied),
+	// blacklist (only DomainProxy is proxied), global (everything proxied),
+	// direct (nothing proxied), or custom (domain lists, rest proxied).
 	ProxyMode string `json:"proxy_mode"`
 
 	// Domain lists: comma separated suffixes routed straight (DomainDirect) or
@@ -94,52 +132,39 @@ type clientSettings struct {
 	DomainDirect string `json:"domain_direct"`
 	DomainProxy  string `json:"domain_proxy"`
 
-	// GeoSplit routes mainland domains and IPs direct and everything else
-	// through the exit. It needs the core's geosite.dat/geoip.metadb: without
-	// those files the core refuses the config (it would try to download them),
-	// so the renderer only emits these rules when the data is present.
-	GeoSplit bool `json:"geo_split"`
-
 	// Behaviour.
-	AutoConnect   bool `json:"auto_connect"`
-	AutoStart     bool `json:"auto_start"`
-	LogAutoScroll bool `json:"log_auto_scroll"`
-	RememberPage  bool `json:"remember_page"`
+	AutoConnect bool `json:"auto_connect"`
+	AutoStart   bool `json:"auto_start"`
 
 	// Starred holds endpoints marked as favourites; the node list shows them
 	// first and they survive a rescan.
 	Starred []string `json:"starred"`
 
-	// Page is the page the window opens on, so the client comes back where the
-	// user left it.
-	Page string `json:"page"`
+	// Pre-capture-mode fields: read once to migrate an old settings.json, then
+	// cleared by normalize so they are never written again. Pointers keep
+	// "absent" distinguishable from an explicit false.
+	Tun         *bool `json:"tun,omitempty"`
+	SystemProxy *bool `json:"system_proxy,omitempty"`
+	IPv6        *bool `json:"ipv6,omitempty"`
 }
 
 const settingsName = "settings.json"
 
-const (
-	splitOff    = "off"
-	splitProxy  = "proxy"
-	splitDirect = "direct"
-)
-
 func defaultSettings() clientSettings {
 	return clientSettings{
-		Theme:         themeLight,
-		Lang:          langZH,
-		Proto:         protoAWG,
-		OuterProto:    protoWG,
-		InnerProto:    protoWG,
-		AutoRepair:    true,
-		MixedPort:     core.DefaultMixedPort,
-		APIPort:       core.DefaultAPIPort,
-		SystemProxy:   true,
-		TimeoutSec:    2,
-		SplitMode:     splitOff,
-		ProxyMode:     modeRule,
-		LogAutoScroll: true,
-		RememberPage:  true,
-		Page:          pageHome,
+		Theme:        themeLight,
+		Lang:         langZH,
+		Proto:        protoAWG,
+		OuterProto:   protoWG,
+		InnerProto:   protoWG,
+		AutoRepair:   true,
+		MixedPort:    core.DefaultMixedPort,
+		APIPort:      core.DefaultAPIPort,
+		CaptureMode:  captureProxy,
+		IPFamily:     famV4,
+		TimeoutSec:   2,
+		DNSLeak:      true,
+		ProxyMode:    modeCustom,
 	}
 }
 
@@ -166,6 +191,27 @@ func loadSettings() clientSettings {
 	}
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return defaultSettings()
+	}
+	// A file written before capture modes and IP families existed carries the
+	// old independent switches instead. Migrate only when the new key is truly
+	// absent: after this release writes the file, an explicit value wins even
+	// when it matches the default.
+	var keys map[string]json.RawMessage
+	if json.Unmarshal(raw, &keys) == nil {
+		if _, ok := keys["capture_mode"]; !ok && s.Tun != nil && *s.Tun {
+			s.CaptureMode = captureTun
+		}
+		if _, ok := keys["ip_family"]; !ok && s.IPv6 != nil && *s.IPv6 {
+			s.IPFamily = famV6
+		}
+	}
+	// The old rule mode plus the geo switch is today's bypass preset; plain
+	// rule mode becomes custom (normalize handles that mapping).
+	var legacy struct {
+		GeoSplit bool `json:"geo_split"`
+	}
+	if json.Unmarshal(raw, &legacy) == nil && legacy.GeoSplit && s.ProxyMode == legacyModeRule {
+		s.ProxyMode = modeBypass
 	}
 	s.normalize()
 	return s
@@ -202,16 +248,66 @@ func (s *clientSettings) normalize() {
 	if s.Proto == "" {
 		s.Proto = protoAWG
 	}
+	if _, err := parseProto(s.Proto); err != nil {
+		s.Proto = protoAWG
+	}
 	if s.OuterProto == "" {
 		s.OuterProto = protoWG
 	}
 	if s.InnerProto == "" {
 		s.InnerProto = protoWG
 	}
-	switch s.ProxyMode {
-	case modeGlobal, modeRule, modeDirect:
+	if s.CaptureMode == "" {
+		if s.Tun != nil && *s.Tun {
+			s.CaptureMode = captureTun
+		} else {
+			s.CaptureMode = captureProxy
+		}
+	}
+	switch s.CaptureMode {
+	case captureProxy, captureTun:
 	default:
-		s.ProxyMode = modeRule
+		s.CaptureMode = captureProxy
+	}
+	if s.IPFamily == "" {
+		if s.IPv6 != nil && *s.IPv6 {
+			s.IPFamily = famV6
+		} else {
+			s.IPFamily = famV4
+		}
+	}
+	switch s.IPFamily {
+	case famV4, famV6, famBoth:
+	default:
+		s.IPFamily = famV4
+	}
+	// A nested tunnel's inner MTU (1220) is below IPv6's 1280-byte minimum, so
+	// those protocols cannot carry v6 at all. Clamp rather than render a
+	// config whose v6 half silently blackholes.
+	if !protoV6Capable(s.Proto) {
+		s.IPFamily = famV4
+	}
+	// OpenVPN is IPv4-only end to end: VPN Gate hands out v4 relays and mihomo's
+	// openvpn outbound carries no v6 half. The two exits also replace the same
+	// thing, so a file with both on is resolved to the newer switch.
+	if s.OpenVPN {
+		s.Psiphon = false
+		s.IPFamily = famV4
+	}
+	s.Pin = strings.TrimSpace(s.Pin)
+	if s.Pin != "" && s.IPFamily != famBoth {
+		v6 := endpointIsV6(s.Pin)
+		if (s.IPFamily == famV4 && v6) || (s.IPFamily == famV6 && !v6) {
+			s.Pin = ""
+		}
+	}
+	s.Tun, s.SystemProxy, s.IPv6 = nil, nil, nil
+	switch s.ProxyMode {
+	case modeBypass, modeBlacklist, modeGlobal, modeDirect, modeCustom:
+	case legacyModeRule:
+		s.ProxyMode = modeCustom
+	default:
+		s.ProxyMode = modeCustom
 	}
 	if s.MixedPort < 1 || s.MixedPort > 65535 {
 		s.MixedPort = core.DefaultMixedPort
@@ -230,16 +326,16 @@ func (s *clientSettings) normalize() {
 	if s.TimeoutSec < 1 || s.TimeoutSec > 60 {
 		s.TimeoutSec = 2
 	}
-	switch s.SplitMode {
-	case splitOff, splitProxy, splitDirect:
-	default:
-		s.SplitMode = splitOff
+	// The egress region is an ISO alpha-2 hint or empty for automatic.
+	s.PsiphonRegion = strings.ToUpper(strings.TrimSpace(s.PsiphonRegion))
+	if len(s.PsiphonRegion) != 2 {
+		s.PsiphonRegion = ""
 	}
-	switch s.Page {
-	case pageHome, pageNodes, pageRules, pageSettings, pageLogs:
-	default:
-		s.Page = pageHome
+	s.OpenVPNRegion = strings.ToUpper(strings.TrimSpace(s.OpenVPNRegion))
+	if len(s.OpenVPNRegion) != 2 {
+		s.OpenVPNRegion = ""
 	}
+	s.OpenVPNNode = strings.TrimSpace(s.OpenVPNNode)
 	out := s.Starred[:0]
 	for _, e := range s.Starred {
 		if e = strings.TrimSpace(e); e != "" {
@@ -248,11 +344,6 @@ func (s *clientSettings) normalize() {
 	}
 	s.Starred = out
 }
-
-// splitAppList returns the process names the user listed, de-duplicated and in
-// order. Commas, semicolons and whitespace all separate, so a list pasted from
-// anywhere works without hand-editing.
-func (s clientSettings) splitAppList() []string { return fieldList(s.SplitApps) }
 
 // domainDirectList / domainProxyList are the two domain suffix lists.
 func (s clientSettings) domainDirectList() []string { return fieldList(s.DomainDirect) }
@@ -278,11 +369,6 @@ func fieldList(raw string) []string {
 		out = append(out, f)
 	}
 	return out
-}
-
-// splitActive reports whether per-app split tunnelling should emit rules.
-func (s clientSettings) splitActive() bool {
-	return s.SplitMode != splitOff && len(s.splitAppList()) > 0
 }
 
 // starred reports whether an endpoint is a favourite.
@@ -323,7 +409,7 @@ func sortStrings(v []string) {
 }
 
 // apply folds the preference file into the options a connect will run with.
-// Session choices (proto, tun, rescan, psiphon, pinned endpoint, protocol pair)
+// Session choices (proto, rescan, psiphon, pinned endpoint, protocol pair)
 // stay the caller's: they describe this connect, not the preference file.
 func (s clientSettings) apply(o *options) {
 	if s.MixedPort > 0 {
@@ -332,20 +418,26 @@ func (s clientSettings) apply(o *options) {
 	if s.APIPort > 0 {
 		o.apiPort = s.APIPort
 	}
-	o.ipv6 = s.IPv6
+	o.allowLan = s.AllowLan
+	o.family = s.IPFamily
+	// The scan cache and the endpoint pools are keyed by a single family; a
+	// dual-stack tunnel still scans v4 endpoints (it carries both either way).
+	o.ipv6 = s.IPFamily == famV6
 	o.mtu = s.MTU
 	if s.TimeoutSec > 0 {
 		o.timeoutSec = s.TimeoutSec
 	}
 	o.dns = strings.TrimSpace(s.DNSCustom)
 	o.noDNS = s.DNSOff
-	// SystemProxy is the user-facing switch; the engine's flag is its inverse.
-	o.noProxy = !s.SystemProxy
-	o.splitMode = s.SplitMode
-	o.splitApps = s.splitAppList()
+	o.dnsLeak = s.DNSLeak && !s.DNSOff
+	// Capture mode, not the old proxy switch: TUN also leaves WinINET alone.
+	o.tunMode = s.CaptureMode == captureTun
+	o.noProxy = s.CaptureMode != captureProxy
 	o.proxyMode = s.ProxyMode
 	o.domainDirect = s.domainDirectList()
 	o.domainProxy = s.domainProxyList()
-	o.geoSplit = s.GeoSplit
 	o.noGuard = !s.AutoRepair
+	o.psiphonRegion = s.PsiphonRegion
+	o.openvpnRegion = s.OpenVPNRegion
+	o.openvpnNodePin = s.OpenVPNNode
 }

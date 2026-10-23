@@ -66,6 +66,7 @@ func psiphonLaunchFromState(st clientState) (psiphonLaunch, error) {
 		BaseConfigPath: baseConfig,
 		Upstream:       fmt.Sprintf("socks5://127.0.0.1:%d", underlaySocksPort(mixed)),
 		SocksPort:      st.PsiphonSocksPort,
+		EgressRegion:   st.PsiphonRegion,
 	}, nil
 }
 

@@ -3,12 +3,17 @@
 package main
 
 import (
+	"fmt"
+	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/lxn/walk"
+
+	"github.com/xhwarp/warp-client/internal/core"
 )
 
 // actionPages routes every id that is not part of the connect pipeline (which
@@ -44,12 +49,24 @@ func (u *natUI) actionPages(id string) {
 		u.mutateSettings(func(s *clientSettings) { s.Lang = v })
 		u.applyLang()
 
-	case strings.HasPrefix(id, "ruletab:"):
-		m.ruleTab = strings.TrimPrefix(id, "ruletab:")
-		u.invalidate()
-	case strings.HasPrefix(id, "settab:"):
-		m.setTab = strings.TrimPrefix(id, "settab:")
-		u.invalidate()
+	case strings.HasPrefix(id, "pickpreset:"):
+		v := strings.TrimPrefix(id, "pickpreset:")
+		m.dropOpen = ""
+		switch v {
+		case modeBypass, modeBlacklist, modeGlobal, modeDirect, modeCustom:
+		default:
+			u.invalidate()
+			return
+		}
+		// Bypass mainland is a ruleset over the geo databases; without them the
+		// core refuses the config, so picking it would disconnect the user. The
+		// popup already draws that row as unavailable.
+		if v == modeBypass && !geoDataReady() {
+			u.invalidate()
+			return
+		}
+		u.mutateSettings(func(s *clientSettings) { s.ProxyMode = v })
+
 	case strings.HasPrefix(id, "logtab:"):
 		m.logTab = strings.TrimPrefix(id, "logtab:")
 		u.invalidate()
@@ -86,23 +103,19 @@ func (u *natUI) actionPages(id string) {
 	}
 }
 
-// gotoPage switches pages. The choice is persisted so the window reopens where
-// the user left it — unless they turned that off.
+// gotoPage switches pages. The start page is always Home, so nothing about the
+// current page is persisted.
 func (u *natUI) gotoPage(page string) {
 	switch page {
-	case pageHome, pageNodes, pageRules, pageSettings, pageLogs:
+	case pageHome, pageNodes, pageRules, pageSettings, pageAbout, pageLogs:
 	default:
 		return
 	}
 	u.m.page = page
-	u.m.set.Page = page
-	if !u.m.set.RememberPage {
-		u.m.set.Page = pageHome
-	}
-	if err := saveSettings(u.m.set); err != nil {
-		u.addLog(tr("设置保存失败: ")+err.Error(), true)
-	}
 	u.m.scroll = 0
+	if page != pageSettings {
+		u.m.setScroll = 0
+	}
 	u.invalidate()
 }
 
@@ -130,8 +143,11 @@ func (u *natUI) actionSetting(id string) {
 		u.mutateSettings(fn)
 	}
 	switch id {
-	case "set:sysproxy":
-		toggle(func(s *clientSettings) { s.SystemProxy = !s.SystemProxy })
+	case "set:allowlan":
+		toggle(func(s *clientSettings) { s.AllowLan = !s.AllowLan })
+		return
+	case "set:rescan":
+		toggle(func(s *clientSettings) { s.Rescan = !s.Rescan })
 		return
 	case "set:autostart":
 		next := !u.m.set.AutoStart
@@ -147,31 +163,30 @@ func (u *natUI) actionSetting(id string) {
 	case "set:autorepair":
 		toggle(func(s *clientSettings) { s.AutoRepair = !s.AutoRepair })
 		return
-	case "set:rememberpage":
-		toggle(func(s *clientSettings) { s.RememberPage = !s.RememberPage })
-		return
 	case "set:dnsdi":
 		toggle(func(s *clientSettings) { s.DNSOff = !s.DNSOff })
 		return
-	case "set:geo":
-		toggle(func(s *clientSettings) { s.GeoSplit = !s.GeoSplit })
-		return
-	case "set:logauto":
-		toggle(func(s *clientSettings) { s.LogAutoScroll = !s.LogAutoScroll })
-		// Freezing keeps the current lines on screen; unfreezing drops the
-		// snapshot so the view follows the log again.
-		if u.m.set.LogAutoScroll {
-			u.m.frozenLogs = nil
-		} else {
-			u.m.frozenLogs = append([]natLog(nil), u.m.logs...)
+	case "set:dnsleak":
+		// The switch is disabled in the paint when the configuration cannot
+		// honour it; the guard keeps a stale click from lying about the result.
+		if u.m.set.DNSOff || u.m.set.ProxyMode == modeDirect {
+			return
 		}
+		toggle(func(s *clientSettings) { s.DNSLeak = !s.DNSLeak })
 		return
 	case "set:reset":
 		if u.confirm(tr("恢复默认设置？"), tr("所有设置将回到初始值，需要重新连接才生效。")) {
+			// Autostart lives in the registry, not only in the file: resetting
+			// the file alone would leave the program starting with Windows while
+			// the switch says it does not.
+			if u.m.set.AutoStart {
+				_ = setAutoStart(false)
+			}
 			u.m.set = defaultSettings()
 			if err := saveSettings(u.m.set); err != nil {
 				u.addLog(tr("设置保存失败: ")+err.Error(), true)
 			}
+			u.m.pin = ""
 			u.applyTheme()
 			u.applyLang()
 			u.syncSessionFromSettings()
@@ -186,12 +201,13 @@ func (u *natUI) actionSetting(id string) {
 		return
 	}
 
-	if v, ok := strings.CutPrefix(id, "set:ipfam:"); ok {
-		toggle(func(s *clientSettings) { s.IPv6 = v == "v6" })
-		return
-	}
-	if v, ok := strings.CutPrefix(id, "set:split:"); ok {
-		toggle(func(s *clientSettings) { s.SplitMode = v })
+	if v, ok := strings.CutPrefix(id, "set:capture:"); ok {
+		if v == captureTun && !core.IsElevated() {
+			// Stored anyway: the user may be configuring now and relaunching as
+			// administrator later. The card says why it will not connect yet.
+			u.addLog(tr("TUN 模式需要管理员权限：请以管理员身份重新运行本程序"), true)
+		}
+		toggle(func(s *clientSettings) { s.CaptureMode = v })
 		return
 	}
 	if v, ok := strings.CutPrefix(id, "set:dns:"); ok {
@@ -203,64 +219,140 @@ func (u *natUI) actionSetting(id string) {
 	}
 
 	// Text fields: the canvas has no edit control, so every one of them opens
-	// the same modal input box.
-	type field struct{ hint, value string; set func(*clientSettings, string) }
+	// the same modal input box. Each setter validates its own input and returns
+	// an error instead of silently keeping the old value.
+	type field struct {
+		hint  string
+		value string
+		set   func(*clientSettings, string) error
+	}
+	port := func(n int, other int, label string) error {
+		if n < 1 || n > 65535 {
+			return fmt.Errorf("%s", trf("%s 必须在 1-65535 之间", label))
+		}
+		if n == other {
+			return fmt.Errorf("%s", trf("%s 不能与另一个端口相同", label))
+		}
+		return nil
+	}
 	fields := map[string]field{
-		"set:mixedport": {tr("1-65535"), itoa(int64(u.m.set.MixedPort)), func(s *clientSettings, v string) {
-			if n, err := strconv.Atoi(v); err == nil {
-				s.MixedPort = n
+		"set:mixedport": {tr("请输入 1-65535 之间的端口号"), itoa(int64(u.m.set.MixedPort)), func(s *clientSettings, v string) error {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return fmt.Errorf("%s", tr("端口必须是数字"))
 			}
-		}},
-		"set:apiport": {tr("1-65535"), itoa(int64(u.m.set.APIPort)), func(s *clientSettings, v string) {
-			if n, err := strconv.Atoi(v); err == nil {
-				s.APIPort = n
+			if err := port(n, s.APIPort, tr("本地代理端口")); err != nil {
+				return err
 			}
+			s.MixedPort = n
+			return nil
 		}},
-		"set:mtu": {tr("0 = 自动"), itoa(int64(u.m.set.MTU)), func(s *clientSettings, v string) {
-			if n, err := strconv.Atoi(v); err == nil {
-				s.MTU = n
+		"set:apiport": {tr("请输入 1-65535 之间的端口号"), itoa(int64(u.m.set.APIPort)), func(s *clientSettings, v string) error {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return fmt.Errorf("%s", tr("端口必须是数字"))
 			}
-		}},
-		"set:timeout": {tr("1-60 秒"), itoa(int64(u.m.set.TimeoutSec)), func(s *clientSettings, v string) {
-			if n, err := strconv.Atoi(v); err == nil {
-				s.TimeoutSec = n
+			if err := port(n, s.MixedPort, tr("API 端口")); err != nil {
+				return err
 			}
+			s.APIPort = n
+			return nil
 		}},
-		"set:dns": {tr("逗号分隔，如 223.5.5.5, 1.1.1.1"), u.m.set.DNSCustom, func(s *clientSettings, v string) {
-			s.DNSCustom = strings.TrimSpace(v)
+		"set:mtu": {tr("0 = 自动"), itoa(int64(u.m.set.MTU)), func(s *clientSettings, v string) error {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 || n > 9000 {
+				return fmt.Errorf("%s", tr("MTU 必须在 0-9000 之间（0 = 自动）"))
+			}
+			s.MTU = n
+			return nil
 		}},
-		"set:splitapps": {tr("进程名，如 chrome.exe, steam.exe"), u.m.set.SplitApps, func(s *clientSettings, v string) {
-			s.SplitApps = strings.TrimSpace(v)
+		"set:timeout": {tr("1-60 秒"), itoa(int64(u.m.set.TimeoutSec)), func(s *clientSettings, v string) error {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 || n > 60 {
+				return fmt.Errorf("%s", tr("连接超时必须在 1-60 秒之间"))
+			}
+			s.TimeoutSec = n
+			return nil
 		}},
-		"set:domdirect": {tr("域名后缀，如 example.com"), u.m.set.DomainDirect, func(s *clientSettings, v string) {
+		"set:dns": {tr("逗号分隔，如 223.5.5.5, 1.1.1.1"), u.m.set.DNSCustom, func(s *clientSettings, v string) error {
+			v = strings.TrimSpace(v)
+			for _, item := range fieldList(v) {
+				if _, err := netip.ParseAddr(item); err != nil {
+					return fmt.Errorf("%s", trf("无效的 DNS 地址: %s", item))
+				}
+			}
+			s.DNSCustom = v
+			return nil
+		}},
+		"set:domdirect": {tr("逗号分隔的域名后缀，如 example.com；留空不启用"), u.m.set.DomainDirect, func(s *clientSettings, v string) error {
 			s.DomainDirect = strings.TrimSpace(v)
+			return nil
 		}},
-		"set:domproxy": {tr("域名后缀，如 example.com"), u.m.set.DomainProxy, func(s *clientSettings, v string) {
+		"set:domproxy": {tr("逗号分隔的域名后缀，如 example.com；留空不启用"), u.m.set.DomainProxy, func(s *clientSettings, v string) error {
 			s.DomainProxy = strings.TrimSpace(v)
+			return nil
 		}},
-		"set:picknode": {tr("端点，如 188.114.97.198:4500（留空 = 自动）"), u.m.pin, func(s *clientSettings, v string) {
-			u.m.pin = strings.TrimSpace(v)
+		"set:picknode": {tr("端点，如 188.114.97.198:4500（留空 = 自动）"), u.m.pin, func(s *clientSettings, v string) error {
+			v = strings.TrimSpace(v)
+			if v != "" && !validPinEndpoint(v) {
+				return fmt.Errorf("%s", tr("节点格式应为 IP 或 IP:端口"))
+			}
+			s.Pin = v
+			return nil
 		}},
 	}
 	f, ok := fields[id]
 	if !ok {
 		return
 	}
-	v, ok := u.promptText(tr(fieldTitle(id)), f.hint, f.value)
+	v, ok := u.promptTextCheck(tr(fieldTitle(id)), f.hint, f.value, func(raw string) error {
+		// Validate against a copy: a rejected value must leave the live
+		// settings untouched while the dialog stays open.
+		tmp := u.m.set
+		return f.set(&tmp, strings.TrimSpace(raw))
+	})
 	if !ok {
 		return
 	}
-	fn := f.set
-	u.mutateSettings(func(s *clientSettings) { fn(s, v) })
-	if id == "set:picknode" {
-		u.m.pin = strings.TrimSpace(v)
+	if err := f.set(&u.m.set, strings.TrimSpace(v)); err != nil {
+		u.addLog(err.Error(), true)
+		return
 	}
+	if err := saveSettings(u.m.set); err != nil {
+		u.addLog(tr("设置保存失败: ")+err.Error(), true)
+	} else if u.m.connected {
+		u.m.setDirty = true
+	}
+	if id == "set:picknode" {
+		// normalize may have cleared a pin that does not match the family.
+		if trimmed := strings.TrimSpace(v); trimmed != "" && u.m.set.Pin == "" {
+			u.addLog(tr("该节点与当前地址族不匹配，已清除"), true)
+		}
+		u.m.pin = u.m.set.Pin
+	}
+	u.invalidate()
+}
+
+// validPinEndpoint accepts a bare IP or an IP:port endpoint.
+func validPinEndpoint(v string) bool {
+	if _, err := netip.ParseAddr(strings.Trim(v, "[]")); err == nil {
+		return true
+	}
+	host, port, err := net.SplitHostPort(v)
+	if err != nil {
+		return false
+	}
+	if _, err := netip.ParseAddr(strings.Trim(host, "[]")); err != nil {
+		return false
+	}
+	n, err := strconv.Atoi(port)
+	return err == nil && n >= 1 && n <= 65535
 }
 
 func fieldTitle(id string) string {
 	switch id {
 	case "set:mixedport":
-		return "混合端口"
+		return "本地代理端口"
 	case "set:apiport":
 		return "API 端口"
 	case "set:mtu":
@@ -269,8 +361,6 @@ func fieldTitle(id string) string {
 		return "连接超时（秒）"
 	case "set:dns":
 		return "自定义 DNS"
-	case "set:splitapps":
-		return "应用进程"
 	case "set:domdirect":
 		return "直连域名"
 	case "set:domproxy":
@@ -285,9 +375,9 @@ func fieldTitle(id string) string {
 func (u *natUI) syncSessionFromSettings() {
 	s := u.m.set
 	u.m.proto = s.Proto
-	u.m.tun = s.Tun
-	u.m.rescan = s.Rescan
+	u.m.pin = s.Pin
 	u.m.psiphon = s.Psiphon
+	u.m.openvpn = s.OpenVPN
 	u.m.outerProto = s.OuterProto
 	u.m.innerProto = s.InnerProto
 	u.invalidate()

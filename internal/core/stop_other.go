@@ -23,3 +23,7 @@ func WaitClientOrCore(clientPID, corePID int) (bool, error) {
 func KillByPID(pid int, expectExe string) error {
 	return errors.New("core: kill by pid is not supported on this platform")
 }
+
+// KillStaleCores is Windows-only; elsewhere the core is tied to the client's
+// own lifetime by the shell, so there is nothing to reap.
+func KillStaleCores(exe string) int { return 0 }

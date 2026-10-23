@@ -9,13 +9,20 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 
 	"github.com/lxn/walk"
 
@@ -25,12 +32,34 @@ import (
 // guiNativeAvailable reports that this platform builds a native window.
 const guiNativeAvailable = true
 
-// fonts is the whole type ramp: eight text sizes plus a monospace face for the
-// log console. The palettes live in gui_theme_windows.go.
+// fonts is the whole type ramp plus a monospace face for the log console. The
+// palettes live in gui_theme_windows.go.
+//
+// The numbers in the token names are the ramp's *steps*, not point sizes: the
+// real size of every face is fontSpecs' pt value times the window scale, so a
+// maximised window enlarges type with the cards instead of leaving 9pt text
+// swimming in a 1.5x layout. Steps are spaced by role (caption 9 / label 10 /
+// body 11 / value 17 / title 15), which is what keeps the cards looking
+// related instead of hand-sized.
 type fonts struct {
-	f8, f9, f10, f10b, f11b, f12b, f13b, f15b, f17b *walk.Font
-	fmono                                            *walk.Font
+	f8, f9, f10, f10b, f11b, f12b, f12, f13, f13b, f15, f15b, f16b, f17b, f18b, f22b, f25b, f30b *walk.Font
+	fmono                                                                                        *walk.Font
 }
+
+// fontSpec is one face of the ramp: where to store it, its family and its size
+// at window scale 1.0 (the 1080x700 design grid).
+type fontSpec struct {
+	dst   **walk.Font
+	name  string
+	pt    int
+	style walk.FontStyle
+}
+
+// uiFont is the typeface: the Windows UI variant of YaHei is the closest thing
+// to the macOS system look that ships with every Chinese Windows install — it
+// is lighter and better hinted than plain "Microsoft YaHei".
+const uiFont = "Microsoft YaHei UI"
+const uiFontFallback = "Microsoft YaHei"
 
 // ---------------------------------------------------------------------------
 // Model — mutated only on the GUI thread; workers compute off-thread and hand
@@ -41,9 +70,20 @@ type natModel struct {
 	proto      string
 	outerProto string // WARP-in-WARP outer carrier (wg|awg)
 	innerProto string // WARP-in-WARP inner tunnel (wg|awg)
-	tun        bool
-	rescan     bool // force a fresh scan before connecting
-	psiphon    bool // Psiphon exit switch: base protocol + Psiphon (never for wwarp)
+	psiphon    bool   // Psiphon exit switch: base protocol + Psiphon (never for chained protocols)
+	openvpn    bool   // OpenVPN (VPN Gate) exit switch; mutually exclusive with Psiphon
+	// vpnCountries is the VPN Gate pool grouped by country, for the OpenVPN
+	// region dropdown. It is derived from the cached node list, so the popup
+	// never offers a country with no node behind it. vpnNodes keeps the full
+	// pool so an expanded country can list its relays with measured latency.
+	vpnNodes     []vpnGateNode
+	vpnCountries []vpnGateCountry
+	vpnExpanded  string // country whose node list is open in the popup
+	vpnPoolBusy  bool
+	vpnPoolNote  string
+	vpnScroll    int  // vpnregion popup scroll (rows)
+	vpnProbeBusy bool // latency probe for the cached pool is in flight
+	vpnMeasured  bool // the current pool already carries measured latency
 
 	endpoints []cachedEndpoint
 	pin       string
@@ -54,10 +94,17 @@ type natModel struct {
 	working    bool // true while a connect/disconnect goroutine is in flight
 	connected  bool
 	status     clientState
-	latency    int64 // live proxy-group delay ms
+	latency    int64 // live delay ms: through the tunnel, or direct when idle
 	samples    []int64
 	upRates    []int64 // live throughput samples, bytes/sec (upload)
 	downRates  []int64 // live throughput samples, bytes/sec (download)
+
+	// The machine's own coordinates, shown on the home tiles while no tunnel
+	// is up: the LAN address, and the public IP's country/city.
+	localLan  string
+	localIP   string
+	localCC   string
+	localCity string
 
 	logs []natLog // newest last; capped by addLog
 
@@ -73,6 +120,13 @@ type natModel struct {
 	hover  string
 	spin   int
 	scroll int // node list scroll (rows)
+	// Settings scroll: design-pixel offset into the single settings column and
+	// the furthest it may go, both recomputed by the page each paint.
+	setScroll    int
+	setScrollMax int
+	// dropOpen names the currently open dropdown popup ("", "region" or
+	// "proto"). One at a time; a click anywhere else closes it.
+	dropOpen string
 
 	// Shell state: which page, which tab inside it, and the node list's own
 	// view (search text, filter, sort, how many rows fit).
@@ -81,10 +135,7 @@ type natModel struct {
 	nodeFilter      string
 	nodeSort        string
 	nodeVisibleRows int
-	ruleTab         string
-	setTab          string
 	logTab          string
-	frozenLogs      []natLog // frozen snapshot while auto-scroll is off
 
 	// set is the persisted preference file, kept in the model so every page
 	// renders straight from it.
@@ -115,8 +166,6 @@ func newNatModel() *natModel {
 		page:       pageHome,
 		nodeFilter: "all",
 		nodeSort:   "latency",
-		ruleTab:    "global",
-		setTab:     "general",
 		logTab:     "run",
 		set:        defaultSettings(),
 	}
@@ -142,6 +191,17 @@ type natUI struct {
 	sp []spot
 	k  float64
 
+	// The design grid is 1080x700 and is scaled uniformly (u.k) into the client
+	// area: oy is the vertical letterbox offset in device pixels, and dw is the
+	// grid *width* in design units, which grows with a wide window so the cards
+	// take the extra space instead of leaving a blank strip on the right.
+	ox, oy int
+	dw     float64
+	// fonts is the ramp's construction table, and fontK the scale it was built
+	// for: paint rebuilds the whole ramp when the window scale drifts.
+	fonts []fontSpec
+	fontK float64
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -153,13 +213,32 @@ type natUI struct {
 	repairing atomic.Bool
 }
 
+// s scales a length (width, height, radius) from the design grid to pixels.
 func (u *natUI) s(v float64) int { return int(v*u.k + 0.5) }
 
+// sx / sy scale a coordinate and add the centring offset; only these two may be
+// used for an x or a y. Lengths go through s. sy also skips the caption band, so
+// every page can keep using 0 as its own top edge while the window draws its
+// buttons above it.
+func (u *natUI) sx(v float64) int { return u.ox + u.s(v) }
+func (u *natUI) sy(v float64) int { return u.oy + u.s(v+capH) }
+
+// ux / uy are the inverse, for the few places that reason about a point the
+// canvas already drew (the sparkline column fill).
+func (u *natUI) ux(px int) float64 { return (float64(px) - float64(u.ox)) / u.k }
+func (u *natUI) uy(px int) float64 { return (float64(px) - float64(u.oy)) / u.k }
+
 func (u *natUI) r(x, y, w, h float64) walk.Rectangle {
-	return walk.Rectangle{X: u.s(x), Y: u.s(y), Width: u.s(w), Height: u.s(h)}
+	return walk.Rectangle{X: u.sx(x), Y: u.sy(y), Width: u.s(w), Height: u.s(h)}
 }
 
-func (u *natUI) p(x, y float64) walk.Point { return walk.Point{X: u.s(x), Y: u.s(y)} }
+func (u *natUI) p(x, y float64) walk.Point { return walk.Point{X: u.sx(x), Y: u.sy(y)} }
+
+// pxRect is a rectangle given entirely in device pixels: full-bleed surfaces
+// (the window, the sidebar strip) are not part of the design grid.
+func pxRect(x, y, w, h int) walk.Rectangle {
+	return walk.Rectangle{X: x, Y: y, Width: w, Height: h}
+}
 
 func (u *natUI) addSpot(id string, r walk.Rectangle, enabled bool) {
 	u.sp = append(u.sp, spot{id: id, r: r, enabled: enabled})
@@ -180,12 +259,30 @@ func runNativeGUI(ctx context.Context, _ options) error {
 	if tb := mw.ToolBar(); tb != nil {
 		tb.SetVisible(false)
 	}
-	mw.SetTitle("xiaohe VPN Client")
-	if err := mw.SetClientSize(walk.Size{Width: 1080, Height: 700}); err != nil {
+	// walk creates a status bar that nobody asked for. It is part of the client
+	// area, and once the caption is stripped it turns into a grey strip under the
+	// page that also pushes the window past the work area. The client is the
+	// 1080x734 design grid and nothing else.
+	if sb := mw.StatusBar(); sb != nil {
+		sb.SetVisible(false)
+	}
+	mw.SetTitle("XEHN VPN Client")
+	// Design units are 96-DPI logical pixels, so the initial client is scaled by
+	// the display DPI: on a 200% screen the same window would otherwise open at
+	// half its intended apparent size with tiny text. fitDesignWindow caps and
+	// centres it once the window knows its monitor.
+	dpi := windowDPI(uintptr(mw.Handle()))
+	if err := mw.SetClientSizePixels(walk.Size{
+		Width:  int(math.Round(designW * dpi / 96)),
+		Height: int(math.Round(designH * dpi / 96)),
+	}); err != nil {
 		mw.Dispose()
 		return fmt.Errorf("set client size: %w", err)
 	}
-	mw.SetMinMaxSize(walk.Size{Width: 1080, Height: 700}, walk.Size{})
+	// The layout is a uniformly scaled 1080x734 grid, so the floor can sit well
+	// under the design size: everything shrinks with it instead of clipping. The
+	// minimum keeps the design ratio, so a dragged window never letterboxes.
+	mw.SetMinMaxSizePixels(walk.Size{Width: 800, Height: 544}, walk.Size{})
 
 	u := &natUI{
 		mw:  mw,
@@ -194,43 +291,43 @@ func runNativeGUI(ctx context.Context, _ options) error {
 		ctx: ctx,
 	}
 
-	// Preferences first, so the window opens on the page, theme and language
-	// the user chose last time. Autostart is read back from the registry rather
+	// Preferences first, so the window opens with the theme and language the
+	// user chose last time. Autostart is read back from the registry rather
 	// than trusted from the file: the registry is what actually launches the
 	// program, and a value removed by hand must not keep showing as "on".
 	u.m.set = loadSettings()
 	u.m.set.AutoStart = autoStartEnabled()
-	if u.m.set.RememberPage {
-		u.m.page = u.m.set.Page
-	} else {
-		u.m.page = pageHome
-	}
 	u.syncSessionFromSettings()
 	u.applyTheme()
 	u.applyLang()
 
-	for _, fr := range []struct {
-		dst  **walk.Font
-		name string
-		sz   int
-		st   walk.FontStyle
-	}{
-		{&u.f.f8, "Microsoft YaHei", 8, 0},
-		{&u.f.f9, "Microsoft YaHei", 9, 0},
-		{&u.f.f10, "Microsoft YaHei", 10, 0},
-		{&u.f.f10b, "Microsoft YaHei", 10, walk.FontBold},
-		{&u.f.f11b, "Microsoft YaHei", 11, walk.FontBold},
-		{&u.f.f12b, "Microsoft YaHei", 12, walk.FontBold},
-		{&u.f.f13b, "Microsoft YaHei", 13, walk.FontBold},
-		{&u.f.f15b, "Microsoft YaHei", 15, walk.FontBold},
-		{&u.f.f17b, "Microsoft YaHei", 17, walk.FontBold},
-		{&u.f.fmono, "Consolas", 9, 0},
-	} {
-		*fr.dst, err = walk.NewFont(fr.name, fr.sz, fr.st)
-		if err != nil {
-			mw.Dispose()
-			return fmt.Errorf("font: %w", err)
-		}
+	// The reference mock uses one weight throughout: nothing is bold. Every
+	// face is therefore created with style 0 — the *b token names stay because
+	// the paint sites already pick the right role, they just no longer shout.
+	// Hierarchy comes from size and colour, exactly as in the mock.
+	u.fonts = []fontSpec{
+		{&u.f.f8, uiFont, 9, 0},    // caption / hint
+		{&u.f.f9, uiFont, 10, 0},   // label, list text
+		{&u.f.f10, uiFont, 11, 0},  // body
+		{&u.f.f10b, uiFont, 11, 0}, // body (same weight, by design)
+		{&u.f.f11b, uiFont, 11, 0}, // card title
+		{&u.f.f12b, uiFont, 12, 0}, // stat value, tab
+		{&u.f.f12, uiFont, 10, 0},  // small
+		{&u.f.f13, uiFont, 11, 0},  // sidebar status
+		{&u.f.f13b, uiFont, 12, 0}, // brand, button word
+		{&u.f.f15, uiFont, 12, 0},  // placeholder
+		{&u.f.f15b, uiFont, 15, 0}, // page title
+		{&u.f.f16b, uiFont, 13, 0}, // sidebar item
+		{&u.f.f17b, uiFont, 15, 0}, // big value (IP, rate, ms)
+		{&u.f.f18b, uiFont, 17, 0}, // display
+		{&u.f.f22b, uiFont, 18, 0}, // display, large
+		{&u.f.f25b, uiFont, 20, 0}, // hero
+		{&u.f.f30b, uiFont, 24, 0}, // hero, large
+		{&u.f.fmono, "Consolas", 10, 0},
+	}
+	if err := u.rebuildFonts(1); err != nil {
+		mw.Dispose()
+		return err
 	}
 
 	cw, err := walk.NewCustomWidgetPixels(mw, 0, u.paint)
@@ -270,8 +367,17 @@ func runNativeGUI(ctx context.Context, _ options) error {
 	go u.spinLoop()
 	go u.probeCore()         // stats the core, asks it which protocols it can parse
 	u.reloadEndpoints(false) // fast cache read on the (main) GUI goroutine
+	u.refreshVPNGatePool()   // cached country list for the OpenVPN exit selector
 
 	mw.Show()
+	// The window owns its top edge: no OS caption, no title text, only the three
+	// buttons the page paints. Done after Show, because creating/showing the form
+	// applies walk's own window styles.
+	u.stripCaptionBar()
+	u.fitDesignWindow()
+	u.constrainWindowToWorkArea()
+	u.setWindowIcon()
+	u.invalidate()
 
 	// Auto-connect starts here, after the window exists: the connect pipeline
 	// posts its progress through Synchronize, which is a PostMessage and simply
@@ -301,19 +407,70 @@ func runNativeGUI(ctx context.Context, _ options) error {
 	// every other process would keep standing aside for an owner that left.
 	releaseHealthOwner(os.Getpid())
 	u.disposeFonts()
+	disposeLogo()
 	cw.Dispose()
 	mw.Dispose()
 	return nil
 }
 
 func (u *natUI) disposeFonts() {
-	for _, f := range []*walk.Font{
-		u.f.f8, u.f.f9, u.f.f10, u.f.f10b, u.f.f11b,
-		u.f.f12b, u.f.f13b, u.f.f15b, u.f.f17b, u.f.fmono,
-	} {
-		if f != nil {
+	for _, spec := range u.fonts {
+		if f := *spec.dst; f != nil {
 			f.Dispose()
+			*spec.dst = nil
 		}
+	}
+}
+
+// rebuildFonts recreates the whole type ramp at the given zoom: every face is
+// its design size times zoom, so at 1.5x the text is 1.5x too and the layout
+// keeps the proportions it was designed with. Painted text is the only part of
+// this window that is not scaled by the geometry helpers, and without this the
+// cards grow while the words inside them stay 9pt.
+//
+// zoom is not u.k: k also contains the display's DPI (a 200% screen gives
+// k = 2 for the default window), and GDI already renders a point size at that
+// DPI. Dividing it out leaves the pure "the user made the window bigger"
+// factor — the one thing the fonts have to follow.
+//
+// It is called from paint (the GUI thread) and only when the scale actually
+// moved, so a drag-resize rebuilds at most a few dozen times.
+func (u *natUI) rebuildFonts(zoom float64) error {
+	if zoom <= 0 {
+		zoom = 1
+	}
+	u.fontK = zoom
+	for _, spec := range u.fonts {
+		// The floor must stay low: at 200% DPI a 1:1 window needs zoom 0.5,
+		// where a 6pt clamp would inflate every small face by a third.
+		pt := int(math.Round(float64(spec.pt) * zoom))
+		if pt < 3 {
+			pt = 3
+		}
+		f, err := walk.NewFont(spec.name, pt, spec.style)
+		if err != nil && spec.name != uiFontFallback {
+			// The UI variant is missing on very old installs: fall back once.
+			f, err = walk.NewFont(uiFontFallback, pt, spec.style)
+		}
+		if err != nil {
+			return fmt.Errorf("font: %w", err)
+		}
+		if old := *spec.dst; old != nil {
+			old.Dispose()
+		}
+		*spec.dst = f
+	}
+	return nil
+}
+
+// scaleFonts keeps the ramp in step with the window: a one-percent change is
+// invisible, so it is not worth recreating eighteen faces for it.
+func (u *natUI) scaleFonts(zoom float64) {
+	if u.fontK > 0 && math.Abs(zoom-u.fontK) < 0.02 {
+		return
+	}
+	if err := u.rebuildFonts(zoom); err != nil {
+		u.fontK = zoom // do not retry every frame
 	}
 }
 
@@ -352,6 +509,8 @@ func (u *natUI) statusLoop() {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
 	var blocker string
+	localTick := 0
+	var lip, lcc, lcity string
 	// Consecutive failed tunnel probes. An endpoint DPI tears down
 	// mid-session leaves a Connected light over a dark tunnel — the exact
 	// "shows connected but every page fails" state this client must never
@@ -385,7 +544,7 @@ func (u *natUI) statusLoop() {
 			// connect itself verified makes them flicker off right after
 			// "Connected" appears.
 			exIP, cc, colo, city = st.ExitIP, st.Country, st.Colo, st.NodeCity
-			if probe, perr := fetchExitProbe(st.MixedPort); perr == nil {
+			if probe, perr := fetchSessionProbe(st.MixedPort, st.Family); perr == nil {
 				tunnelFails = 0
 				if probe.ExitIP != "" {
 					exIP = probe.ExitIP
@@ -434,23 +593,39 @@ func (u *natUI) statusLoop() {
 			// two schedules end up killing each other's cores.
 			if tunnelFails >= tunnelFailLimit && ownsHealth && !u.m.working && !u.m.connecting && u.repairing.CompareAndSwap(false, true) {
 				tunnelFails = 0
+				openvpnSession := st.OpenVPNMode
 				u.sync(func() {
-					u.addLog("数据面无响应（端点已失效）：正在自动切换到备用端点…", true)
+					if openvpnSession {
+						u.addLog("数据面无响应（VPN Gate 出口失效）：正在更换出口节点…", true)
+					} else {
+						u.addLog("数据面无响应（端点已失效）：正在自动切换到备用端点…", true)
+					}
 				})
 				go func(st clientState) {
 					defer u.repairing.Store(false)
 					logf := func(s string) {
 						u.sync(func() { u.addLog(s, false) })
 					}
-					opts := optionsFromState(st)
-					tried := map[string]bool{}
-					newState, ok := repairOnce(u.ctx, opts, st.Endpoint, tried, logf)
-					if !ok {
-						// Every cached candidate failed too: the cache is
-						// stale as a whole. One fresh scan, then admit defeat.
-						logf("缓存端点全部失活，重新扫描…")
-						opts.scanNow = true
+					var (
+						newState clientState
+						ok       bool
+					)
+					if st.OpenVPNMode {
+						// Relay first: a VPN Gate node churns far faster than the
+						// WARP underlay, and rotating the underlay would silently
+						// drop the exit the user chose.
+						newState, ok = repairOpenVPNOnce(u.ctx, st, logf)
+					} else {
+						opts := optionsFromState(st)
+						tried := map[string]bool{}
 						newState, ok = repairOnce(u.ctx, opts, st.Endpoint, tried, logf)
+						if !ok {
+							// Every cached candidate failed too: the cache is
+							// stale as a whole. One fresh scan, then admit defeat.
+							logf("缓存端点全部失活，重新扫描…")
+							opts.scanNow = true
+							newState, ok = repairOnce(u.ctx, opts, st.Endpoint, tried, logf)
+						}
 					}
 					if ok {
 						u.sync(func() {
@@ -476,12 +651,34 @@ func (u *natUI) statusLoop() {
 			}
 		} else {
 			tunnelFails = 0
+			// Idle: the tiles show the machine itself. Latency is a direct
+			// TCP handshake; the public geo probe is throttled once it has an
+			// answer (every 15th tick ≈ 30s) but retries briskly until the
+			// first success, so a failed first lookup does not blank the tile
+			// for half a minute.
+			lat = directLatency()
+			interval := 15
+			if lip == "" {
+				interval = 3
+			}
+			if localTick%interval == 1 {
+				if ip, cc, city, err := fetchLocalProbe(); err == nil {
+					lip, lcc, lcity = ip, cc, city
+				}
+			}
+			localTick++
 		}
 		u.sync(func() {
 			st.ExitIP, st.Country, st.Colo, st.NodeCity = exIP, cc, colo, city
 			u.m.status = st
 			u.m.proxyBlocker = blocker
 			u.m.connected = st.Connected
+			if u.m.localLan == "" {
+				u.m.localLan = localLanIP()
+			}
+			if lip != "" {
+				u.m.localIP, u.m.localCC, u.m.localCity = lip, lcc, lcity
+			}
 			if lat >= 0 {
 				u.m.latency = lat
 				u.m.samples = append(u.m.samples, lat)
@@ -581,6 +778,188 @@ func (u *natUI) reloadEndpoints(force bool) {
 		return
 	}
 	u.applyEndpoints(proto)
+}
+
+// refreshVPNGatePool reloads the VPN Gate country list for the OpenVPN region
+// dropdown. The cached list answers immediately; a stale or empty cache is
+// refreshed off-thread. The fetch tries direct HTTPS, then the live mixed port,
+// then a throwaway WARP tunnel — the last one is what makes the list work on
+// networks that block vpngate.net (and when the selected WARP endpoint died).
+// force (optional) skips the cache age check, for the popup's retry action.
+func (u *natUI) refreshVPNGatePool(force ...bool) {
+	if u.m.vpnPoolBusy {
+		return
+	}
+	forced := len(force) > 0 && force[0]
+	nodes, at := loadVPNGateCache()
+	stale := forced || len(nodes) == 0 || time.Since(at) >= vpnGateCacheTTL
+	if len(nodes) > 0 {
+		u.m.vpnNodes = nodes
+		u.m.vpnCountries = vpnGateCountries(nodes)
+	}
+	if !stale {
+		u.invalidate()
+		return
+	}
+	u.m.vpnPoolBusy = true
+	u.m.vpnPoolNote = tr("正在获取 VPN Gate 节点…")
+	u.invalidate()
+	go func() {
+		fresh, err := u.fetchVPNGatePool()
+		if len(fresh) > 0 {
+			saveVPNGateCache(fresh)
+		}
+		u.sync(func() {
+			u.m.vpnPoolBusy = false
+			switch {
+			case len(fresh) > 0:
+				u.m.vpnNodes = fresh
+				u.m.vpnCountries = vpnGateCountries(fresh)
+				u.m.vpnMeasured = true
+				u.m.vpnPoolNote = ""
+			case len(u.m.vpnNodes) == 0:
+				if err != nil {
+					u.m.vpnPoolNote = trf("节点列表获取失败：%s（点击重试）", vpnShortErr(err))
+				} else {
+					u.m.vpnPoolNote = tr("节点列表获取失败：请点击重试")
+				}
+			default:
+				// Keep the stale countries usable; the note is only shown when
+				// the popup has nothing else to display.
+				u.m.vpnPoolNote = ""
+			}
+			u.invalidate()
+		})
+	}()
+}
+
+// fetchVPNGatePool runs the whole fetch pipeline off the GUI thread and probes
+// latency through whichever route delivered the list.
+func (u *natUI) fetchVPNGatePool() ([]vpnGateNode, error) {
+	directErr := error(nil)
+	if raw, err := fetchVPNGateDirect(u.ctx); err == nil {
+		if nodes := parseVPNGateCSV(raw); len(nodes) > 0 {
+			u.sync(func() { u.m.vpnPoolNote = tr("正在识别家宽/机房节点…") })
+			enrichCtx, cancel := context.WithTimeout(u.ctx, 20*time.Second)
+			_, _ = enrichVPNGateClasses(enrichCtx, &http.Client{Timeout: 15 * time.Second}, nodes)
+			cancel()
+			u.sync(func() { u.m.vpnPoolNote = tr("正在测量节点延迟…") })
+			measureVPNGateLatency(u.ctx, nodes)
+			sortVPNGateNodesByLatency(nodes)
+			return nodes, nil
+		}
+		directErr = fmt.Errorf("VPN Gate 返回的列表为空")
+	} else {
+		directErr = err
+	}
+
+	proxyErr := directErr
+	if st, lerr := loadState(); lerr == nil && st.Connected && st.MixedPort > 0 {
+		if raw, perr := fetchVPNGateViaProxy(u.ctx, st.MixedPort); perr == nil {
+			if nodes := parseVPNGateCSV(raw); len(nodes) > 0 {
+				u.sync(func() { u.m.vpnPoolNote = tr("正在识别家宽/机房节点…") })
+				enrichCtx, cancel := context.WithTimeout(u.ctx, 20*time.Second)
+				_, _ = enrichVPNGateClasses(enrichCtx, vpnGateProxyClient(st.MixedPort, 15*time.Second), nodes)
+				cancel()
+				u.sync(func() { u.m.vpnPoolNote = tr("正在测量节点延迟…") })
+				measureVPNGateLatency(u.ctx, nodes)
+				sortVPNGateNodesByLatency(nodes)
+				return nodes, nil
+			}
+		} else {
+			proxyErr = perr
+		}
+	}
+
+	u.sync(func() { u.m.vpnPoolNote = tr("直连不可用，正在经 WARP 获取节点…") })
+	nodes, werr := u.fetchVPNGatePoolViaWARP()
+	if werr != nil {
+		return nil, fmt.Errorf("%s；WARP: %s", vpnShortErr(proxyErr), vpnShortErr(werr))
+	}
+	return nodes, nil
+}
+
+// fetchVPNGatePoolViaWARP builds a throwaway tunnel on the protocol the user
+// actually connects with and fetches through it. The endpoint preference is the
+// user's selected endpoint first, then the last endpoint that ever worked, then
+// the cached scan — a half-dead selection costs one handshake, not the fetch.
+func (u *natUI) fetchVPNGatePoolViaWARP() ([]vpnGateNode, error) {
+	underlay := u.m.proto
+	if protoChained(underlay) {
+		underlay = protoAWG
+	}
+	switch underlay {
+	case protoWG, protoAWG, protoMASQUE, protoMASQUEH2:
+	default:
+		underlay = protoAWG
+	}
+	opts := defaultConnectOptions(underlay, false, false)
+	if err := ensureAccount(u.ctx, opts); err != nil {
+		return nil, err
+	}
+	var results []cachedEndpoint
+	if cs, ok := cachedScanFor(underlay, false); ok {
+		results = cs.Results
+	}
+	prefer := u.m.pin
+	if st, err := loadState(); err == nil && st.Endpoint != "" && prefer == "" && st.Proto == underlay {
+		prefer = st.Endpoint
+	}
+	run := mustParseProto(underlay)
+	if len(results) == 0 {
+		// No scan cache to fall back on. Try the remembered endpoint first —
+		// it is usually still alive and a scan costs one to two minutes — but a
+		// dead selection must not end the fetch: scan and try again instead.
+		quickErr := error(nil)
+		if prefer != "" || loadVPNGateUnderlay() != "" {
+			if nodes, err := fetchVPNGateNodesViaWARP(u.ctx, nil, run, prefer); err == nil {
+				return nodes, nil
+			} else {
+				quickErr = err
+				// Both remembered endpoints were just proved dead; spending a
+				// slot on them again after the scan would waste a third of the
+				// retry budget.
+				prefer = ""
+			}
+		}
+		u.sync(func() { u.m.vpnPoolNote = tr("正在扫描 WARP 端点（约 1-2 分钟）…") })
+		fresh, _, err := runCachedScan(u.ctx, opts)
+		if err != nil {
+			if quickErr != nil {
+				return nil, fmt.Errorf("%s；扫描: %s", vpnShortErr(quickErr), vpnShortErr(err))
+			}
+			return nil, err
+		}
+		results = fresh
+	}
+	return fetchVPNGateNodesViaWARP(u.ctx, results, run, prefer)
+}
+
+// probeVPNGateLatencyAsync fills in the latency column when the pool came from
+// the cache: the cache intentionally stores no timing, so without this the
+// picker would show "未测" for every node until the next live fetch.
+func (u *natUI) probeVPNGateLatencyAsync() {
+	if u.m.vpnProbeBusy || u.m.vpnMeasured || len(u.m.vpnNodes) == 0 {
+		return
+	}
+	u.m.vpnProbeBusy = true
+	nodes := append([]vpnGateNode(nil), u.m.vpnNodes...)
+	go func() {
+		measureVPNGateLatency(u.ctx, nodes)
+		sortVPNGateNodesByLatency(nodes)
+		u.sync(func() {
+			u.m.vpnProbeBusy = false
+			if u.m.vpnMeasured {
+				// A live refresh finished first; its pool is newer than this
+				// probe's cached copy.
+				return
+			}
+			u.m.vpnMeasured = true
+			u.m.vpnNodes = nodes
+			u.m.vpnCountries = vpnGateCountries(nodes)
+			u.invalidate()
+		})
+	}()
 }
 
 // protoOK reports whether the installed core parses this protocol's config.
@@ -683,7 +1062,7 @@ func (u *natUI) addLog(text string, err bool) {
 	u.addLogFull(text, lv, false)
 }
 
-// addLogFull appends one line to the log panel; core lines are dimmed.
+// addLogFull appends one line to the log panel.
 func (u *natUI) addLogFull(text string, lv int, core bool) {
 	u.appendLog(text, lv, core, false)
 }
@@ -714,6 +1093,7 @@ func (u *natUI) action(id string) {
 		}
 	case strings.HasPrefix(id, "proto:"):
 		p := strings.TrimPrefix(id, "proto:")
+		m.dropOpen = ""
 		if p != m.proto {
 			// Capability gate: never switch to (let alone render) a protocol
 			// the installed core cannot parse — say so instead.
@@ -723,6 +1103,15 @@ func (u *natUI) action(id string) {
 			}
 			m.proto = p
 			m.pin = ""
+			// Nested protocols cannot carry IPv6 (inner MTU is below the v6
+			// minimum), so the family follows the capability down to v4 rather
+			// than letting the page offer a choice the renderer would ignore.
+			if !protoV6Capable(p) && m.set.IPFamily != famV4 {
+				u.mutateSettings(func(s *clientSettings) {
+					s.IPFamily = famV4
+					s.Pin = ""
+				})
+			}
 			m.scroll = 0
 			u.reloadEndpoints(false)
 			u.invalidate()
@@ -732,23 +1121,139 @@ func (u *natUI) action(id string) {
 				u.doSwitch()
 			}
 		}
-	case id == "tun":
-		if !m.connected {
-			m.tun = !m.tun
-			u.invalidate()
-		}
-	case id == "rescan":
-		if !m.connected {
-			m.rescan = !m.rescan
-			u.invalidate()
-		}
 	case id == "psiphon":
 		m.psiphon = !m.psiphon
+		// The two exits replace the same thing; enabling one turns the other
+		// off instead of letting a file/UI carry both.
+		if m.psiphon {
+			m.openvpn = false
+		}
 		u.invalidate()
 		// Hot switch, like the protocol chips: a live connection swaps its exit
 		// without making the user disconnect by hand first.
-		if m.connected && m.proto != protoWWarp && !m.working && !m.connecting {
+		if m.connected && !protoChained(m.proto) && !m.working && !m.connecting {
 			u.doSwitch()
+		}
+	case id == "openvpn":
+		if protoChained(m.proto) {
+			return
+		}
+		m.openvpn = !m.openvpn
+		if m.openvpn {
+			m.psiphon = false
+		}
+		u.invalidate()
+		if m.openvpn {
+			// The dropdown needs the pool; the cached list usually answers
+			// instantly, a stale one refreshes in the background.
+			u.refreshVPNGatePool()
+		}
+		if m.connected && !m.working && !m.connecting {
+			u.doSwitch()
+		}
+	case id == "drop:region", id == "drop:vpnregion", id == "drop:proto", id == "drop:family", id == "drop:preset":
+		which := strings.TrimPrefix(id, "drop:")
+		if m.dropOpen == which {
+			m.dropOpen = ""
+		} else {
+			m.dropOpen = which
+			if which == "vpnregion" {
+				m.vpnScroll = 0
+				if len(m.vpnCountries) == 0 {
+					u.refreshVPNGatePool()
+				} else if !m.vpnMeasured {
+					u.probeVPNGateLatencyAsync()
+				}
+			}
+		}
+		u.debugLogf(fmt.Sprintf("action %s -> dropOpen=%q page=%q", id, m.dropOpen, m.page))
+		u.invalidate()
+	case id == "vpnrefresh":
+		u.refreshVPNGatePool(true)
+	case strings.HasPrefix(id, "vpncountry:"):
+		cc := strings.TrimPrefix(id, "vpncountry:")
+		if strings.EqualFold(m.vpnExpanded, cc) {
+			m.vpnExpanded = ""
+		} else {
+			m.vpnExpanded = cc
+			for i, row := range u.vpnPopupRows() {
+				if row.kind == vpnRowCountry && row.cc == cc {
+					u.vpnEnsureRowVisible(i)
+					break
+				}
+			}
+		}
+		u.invalidate()
+	case strings.HasPrefix(id, "pickvpnnode:"):
+		nid := strings.TrimPrefix(id, "pickvpnnode:")
+		node, ok := u.vpnNodeByID(nid)
+		if !ok {
+			return
+		}
+		m.dropOpen = ""
+		if m.set.OpenVPNNode != nid || m.set.OpenVPNRegion != node.CountryShort {
+			u.mutateSettings(func(s *clientSettings) {
+				s.OpenVPNNode = nid
+				s.OpenVPNRegion = node.CountryShort
+			})
+			if m.connected && m.openvpn && !m.working && !m.connecting {
+				u.doSwitch()
+			}
+		}
+		u.invalidate()
+	case strings.HasPrefix(id, "pickvpnregion:"):
+		cc := strings.TrimPrefix(id, "pickvpnregion:")
+		m.dropOpen = ""
+		if m.set.OpenVPNRegion != cc || m.set.OpenVPNNode != "" {
+			u.mutateSettings(func(s *clientSettings) {
+				s.OpenVPNRegion = cc
+				s.OpenVPNNode = ""
+			})
+			// The region shapes only the relay: a live OpenVPN session
+			// re-applies it by reconnecting.
+			if m.connected && m.openvpn && !m.working && !m.connecting {
+				u.doSwitch()
+			}
+		}
+		u.invalidate()
+	case strings.HasPrefix(id, "pickregion:"):
+		cc := strings.TrimPrefix(id, "pickregion:")
+		m.dropOpen = ""
+		if m.set.PsiphonRegion != cc {
+			u.mutateSettings(func(s *clientSettings) { s.PsiphonRegion = cc })
+			// The region shapes only a Psiphon exit: like the exit switch, a
+			// live Psiphon session re-applies it by reconnecting.
+			if m.connected && m.psiphon && !protoChained(m.proto) && !m.working && !m.connecting {
+				u.doSwitch()
+			}
+		}
+		u.invalidate()
+	case strings.HasPrefix(id, "pickfamily:"):
+		f := strings.TrimPrefix(id, "pickfamily:")
+		m.dropOpen = ""
+		if f != famV4 && f != famV6 && f != famBoth {
+			u.invalidate()
+			return
+		}
+		if f != famV4 && !protoV6Capable(m.proto) {
+			u.addLog(trf("%s 不支持 IPv6：请先切换协议", protoDisplayName(m.proto)), true)
+			u.invalidate()
+			return
+		}
+		if m.set.IPFamily != f {
+			u.mutateSettings(func(s *clientSettings) { s.IPFamily = f })
+			// normalize drops a pinned node that belongs to the other family.
+			m.pin = m.set.Pin
+		}
+		u.invalidate()
+	case id == "copyip":
+		if ip := u.displayIP(); ip != "" {
+			if err := walk.Clipboard().SetText(ip); err != nil {
+				u.addLog(tr("复制失败")+": "+err.Error(), true)
+			} else {
+				u.addLog(tr("已复制到剪贴板"), false)
+			}
+			u.invalidate()
 		}
 	case id == "outer:wg" || id == "outer:awg":
 		p := strings.TrimPrefix(id, "outer:")
@@ -770,9 +1275,11 @@ func (u *natUI) action(id string) {
 		}
 	case id == "pin:clear":
 		m.pin = ""
+		u.mutateSettings(func(s *clientSettings) { s.Pin = "" })
 		u.invalidate()
 	case strings.HasPrefix(id, "row:"):
 		m.pin = strings.TrimPrefix(id, "row:")
+		u.mutateSettings(func(s *clientSettings) { s.Pin = m.pin })
 		u.invalidate()
 	case id == "core":
 		u.doCore()
@@ -780,7 +1287,6 @@ func (u *natUI) action(id string) {
 		u.reloadEndpoints(true)
 	case id == "logclear":
 		u.m.logs = nil
-		u.m.frozenLogs = nil
 		u.invalidate()
 	case id == "proxyretry":
 		go u.retryProxySet()
@@ -822,7 +1328,7 @@ func (u *natUI) doConnect() {
 func (u *natUI) connectAsync() {
 	m := u.m
 	u.persistSession()
-	o := defaultConnectOptions(m.proto, m.tun, m.rescan)
+	o := defaultConnectOptions(m.proto, m.set.CaptureMode == captureTun, m.set.Rescan)
 	// Settings-page knobs ride on top of the session choices: ports, DNS,
 	// IPv6, MTU, system proxy and split tunnelling.
 	m.set.apply(&o)
@@ -832,9 +1338,15 @@ func (u *natUI) connectAsync() {
 	// - one half-dead endpoint then fails the whole connect (and every
 	// protocol's best going half-dead looks like "nothing connects").
 	o.pick = m.pin
-	// Psiphon is an orthogonal exit switch, never a protocol: V1 supports it on
-	// a plain WG/AWG/MASQUE underlay only, so it is ignored for a chain.
-	if m.psiphon && m.proto != protoWWarp {
+	// Psiphon / OpenVPN are orthogonal exit switches, never protocols, and are
+	// mutually exclusive: V2 wins when both somehow arrive set. Both need a
+	// plain WG/AWG/MASQUE underlay, so they are ignored for a chain.
+	switch {
+	case m.openvpn && !protoChained(m.proto):
+		o.openvpnMode = true
+		o.openvpnRegion = m.set.OpenVPNRegion
+		o.openvpnNodePin = m.set.OpenVPNNode
+	case m.psiphon && !protoChained(m.proto):
 		o.psiphonMode = true
 	}
 	if m.proto == protoWWarp {
@@ -891,6 +1403,11 @@ func (u *natUI) connectAsync() {
 				u.addLog(err.Error(), true)
 			} else {
 				u.addLog("已连接", false)
+				if u.m.openvpn {
+					// The connect refreshed and saved the pool; reload it so the
+					// region dropdown offers the countries it just proved live.
+					u.refreshVPNGatePool()
+				}
 			}
 			u.applyEndpoints(proto)
 			u.invalidate()
@@ -1008,9 +1525,81 @@ func (u *natUI) hit(x, y int) (spot, bool) {
 }
 
 func (u *natUI) onDown(x, y int) {
+	u.clickDebug(x, y)
+	// The caption band belongs to the window, not to a page: the three buttons
+	// act immediately, and empty space there moves the window.
+	if u.inCaption(x, y) {
+		if s, ok := u.hit(x, y); ok && s.enabled && strings.HasPrefix(s.id, "cap:") {
+			if u.windowAction(s.id) {
+				return
+			}
+		}
+		u.startWindowDrag()
+		return
+	}
+	// An open dropdown swallows the click: selecting one of its items lands on
+	// the item's own spot, the header spot toggles it closed, and anywhere
+	// else just dismisses the popup without activating what is underneath.
+	if u.m.dropOpen != "" {
+		if s, ok := u.hit(x, y); ok && s.enabled && u.dropSpotOpen(s.id) {
+			u.action(s.id)
+			return
+		}
+		u.m.dropOpen = ""
+		u.invalidate()
+		return
+	}
 	if s, ok := u.hit(x, y); ok && s.enabled {
 		u.action(s.id)
 	}
+}
+
+// clickDebug appends every press and its hit to %TEMP%\xh-click-debug.log when
+// WARP_UI_DEBUG is set — a temporary aid for the visual harness.
+func (u *natUI) clickDebug(x, y int) {
+	if os.Getenv("WARP_UI_DEBUG") == "" {
+		return
+	}
+	s, ok := u.hit(x, y)
+	id := "<none>"
+	if ok {
+		id = s.id
+	}
+	u.debugLogf(fmt.Sprintf("down %d,%d -> %s", x, y, id))
+}
+
+// debugLogf appends one line to the harness debug log (env-gated).
+func (u *natUI) debugLogf(line string) {
+	if os.Getenv("WARP_UI_DEBUG") == "" {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(os.TempDir(), "xh-click-debug.log"),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err == nil {
+		_, _ = f.WriteString(time.Now().Format("15:04:05.000") + " " + line + "\r\n")
+		_ = f.Close()
+	}
+}
+
+// dropSpotOpen says whether a spot belongs to the currently open dropdown (its
+// header or one of its items), so a click on it is handled rather than
+// dismissing the popup.
+func (u *natUI) dropSpotOpen(id string) bool {
+	switch u.m.dropOpen {
+	case "region":
+		return id == "drop:region" || strings.HasPrefix(id, "pickregion:")
+	case "vpnregion":
+		return id == "drop:vpnregion" || strings.HasPrefix(id, "pickvpnregion:") ||
+			strings.HasPrefix(id, "vpncountry:") || strings.HasPrefix(id, "pickvpnnode:") ||
+			id == "vpnrefresh"
+	case "proto":
+		return id == "drop:proto" || strings.HasPrefix(id, "proto:")
+	case "family":
+		return id == "drop:family" || strings.HasPrefix(id, "pickfamily:")
+	case "preset":
+		return id == "drop:preset" || strings.HasPrefix(id, "pickpreset:")
+	}
+	return false
 }
 
 func (u *natUI) onMove(x, y int) {
@@ -1027,13 +1616,38 @@ func (u *natUI) onMove(x, y int) {
 	}
 }
 
-// onWheel scrolls the node list. The row count is whatever the last paint
-// managed to fit, so the wheel can never scroll past the end; the wheel only
-// acts below the toolbar, which keeps it from reacting to scrolling over the
-// page header.
+// onWheel scrolls the active page: the settings column, or the node list. The
+// row count is whatever the last paint managed to fit, so the wheel can never
+// scroll past the end; it only acts below the header band.
 func (u *natUI) onWheel(x, y int, b walk.MouseButton) {
 	delta := walk.MouseWheelEventDelta(b)
-	if delta == 0 || u.m.nodeVisibleRows == 0 || y < u.s(shellBodyY+52) {
+	if delta == 0 || y < u.sy(shellBodyY) {
+		return
+	}
+	// An open VPN Gate country popup scrolls its own list: the pool can expose
+	// dozens of countries, more than fit between the field and the frame.
+	if u.m.dropOpen == "vpnregion" {
+		max := len(u.vpnPopupRows()) - vpnRegionPopupRows
+		if max < 0 {
+			max = 0
+		}
+		u.m.vpnScroll -= delta / 40
+		if u.m.vpnScroll < 0 {
+			u.m.vpnScroll = 0
+		}
+		if u.m.vpnScroll > max {
+			u.m.vpnScroll = max
+		}
+		u.invalidate()
+		return
+	}
+	if u.m.page == pageSettings {
+		u.m.setScroll -= delta / 2
+		u.clampSetScroll()
+		u.invalidate()
+		return
+	}
+	if u.m.page != pageNodes || u.m.nodeVisibleRows == 0 || y < u.sy(shellBodyY+52) {
 		return
 	}
 	max := len(u.visibleNodeRows()) - u.m.nodeVisibleRows
@@ -1054,20 +1668,66 @@ func (u *natUI) onWheel(x, y int, b walk.MouseButton) {
 // Painting
 // ---------------------------------------------------------------------------
 
-func (u *natUI) paint(c *walk.Canvas, _ walk.Rectangle) error {
+// paintPanics counts recovered paint panics: a broken frame must not flood the
+// log at sixteen repaints a second.
+var paintPanics int
+
+func (u *natUI) paint(c *walk.Canvas, _ walk.Rectangle) (err error) {
+	// A paint bug used to end the process: the panic unwinds through walk's
+	// window procedure, and a windowsgui binary simply disappears with the log
+	// saying nothing. One frame is not worth losing the session over.
+	defer func() {
+		if rec := recover(); rec != nil {
+			paintPanics++
+			if paintPanics <= 3 {
+				u.appendLog(fmt.Sprintf("界面绘制异常（已跳过该帧）: %v", rec), 2, false, false)
+			}
+			err = nil
+		}
+	}()
 	b := u.mw.ClientBoundsPixels()
 	pxW := b.Width
 	if pxW < 10 {
 		pxW = 1080
 	}
-	// The design grid is 1080x700; the display scales it, and every widget
-	// converts through u.r/u.s.
-	u.k = float64(pxW) / 1080.0
+	// The design grid is 1080 wide and (700 + caption) tall; the display scales
+	// it, and every widget converts through u.r/u.s.
+	pxH := b.Height
+	if pxH < 10 {
+		pxH = 700 + capH
+	}
+	// One scale for both axes, and the leftover space distributed as equal
+	// margins. Scaling width and height independently (or top-left anchoring a
+	// uniformly scaled grid) is what makes a maximised window look stretched or
+	// lopsided; this keeps every gap, radius and glyph in the ratio it was
+	// designed with.
+	u.k = math.Min(float64(pxW)/1080.0, float64(pxH)/(700.0+capH))
+	if u.k <= 0 {
+		u.k = 1
+	}
+	// The grid is pinned to the left edge (a sidebar that floats away from the
+	// window edge looks broken) and centred vertically, where the leftover shows
+	// up as canvas either way. Horizontally it *grows*: dw is how many design
+	// units fit across the window, so maximising widens the cards instead of
+	// leaving a blank strip on the right.
+	u.ox = 0
+	u.oy = int((float64(pxH)-(700.0+capH)*u.k)/2 + 0.5)
+	u.dw = float64(pxW) / u.k
+	if u.dw < 1080 {
+		u.dw = 1080
+	}
+	// Type follows the window, not the display: k already carries the DPI.
+	dpi := c.DPI()
+	if dpi <= 0 {
+		dpi = 96
+	}
+	u.scaleFonts(u.k * 96.0 / float64(dpi))
 	u.sp = u.sp[:0]
 
 	if err := c.FillRectanglePixels(u.brush(th.window), walk.Rectangle{X: 0, Y: 0, Width: b.Width, Height: b.Height}); err != nil {
 		return err
 	}
+	u.paintWallpaper(c, b.Width, b.Height)
 	u.paintShell(c)
 	return nil
 }
@@ -1090,6 +1750,9 @@ func (u *natUI) drawSpinner(c *walk.Canvas, cx, cy, radius float64, phase int) {
 		// rotate on the light background.
 		t := float64(i) / 11.0
 		p := u.pen(rx(byte(245-t*186), byte(246-t*155), byte(249-t*30)))
+		if p == nil {
+			continue
+		}
 		_ = c.DrawLinePixels(p, u.p(x1, y1), u.p(x2, y2))
 		p.Dispose()
 	}
@@ -1107,6 +1770,189 @@ func speedText(bps int64) string {
 	}
 }
 
+// fetchLocalProbe asks a geo endpoint directly (no tunnel) for the machine's
+// public IP and where it sits, so the home tiles have a country to show before
+// the first connect. Sources in order: Cloudflare meta, then ip-api (its plain
+// HTTP endpoint answers where CF's TLS one is unreachable). Each source is
+// tried direct AND through the WinINET system proxy, because on exactly the
+// networks this client exists for direct egress is what is broken — while the
+// user's other tooling already talks through a local proxy.
+func fetchLocalProbe() (ip, cc, city string, err error) {
+	var lastErr error
+	for _, url := range []string{
+		"https://speed.cloudflare.com/meta",
+		"http://ip-api.com/json/?fields=query,countryCode,country,city&lang=zh-CN",
+	} {
+		for _, client := range localProbeClients() {
+			var r struct {
+				// cloudflare meta
+				ClientIP string `json:"clientIp"`
+				Country  string `json:"country"`
+				City     string `json:"city"`
+				Colo     struct {
+					City string `json:"city"`
+				} `json:"colo"`
+				// ip-api
+				Query       string `json:"query"`
+				CountryCode string `json:"countryCode"`
+			}
+			req, err := http.NewRequest(http.MethodGet, url, nil)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			// Same as fetchMeta: /meta answers 403 (or {}) without a Referer,
+			// so the CF source in this idle probe was always dead and the tile
+			// only ever got its country from the ip-api fallback.
+			if strings.HasPrefix(url, "https://speed.cloudflare.com") {
+				req.Header.Set("Referer", metaReferer)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			body := make([]byte, 8192)
+			n, _ := resp.Body.Read(body)
+			resp.Body.Close()
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				lastErr = fmt.Errorf("local probe: HTTP %d", resp.StatusCode)
+				continue
+			}
+			if err := json.Unmarshal(body[:n], &r); err != nil {
+				lastErr = err
+				continue
+			}
+			ip, cc := r.ClientIP, r.Country
+			if ip == "" {
+				ip, cc = r.Query, r.CountryCode
+			}
+			if r.City == "" {
+				r.City = r.Colo.City
+			}
+			if ip == "" {
+				lastErr = fmt.Errorf("local probe: no ip in reply")
+				continue
+			}
+			return strings.TrimSpace(ip), cc, r.City, nil
+		}
+	}
+	return "", "", "", lastErr
+}
+
+// localProbeClients is the transport set for the idle-state geo probe: direct
+// (with env-proxy support) plus the WinINET system proxy when one is enabled.
+func localProbeClients() []*http.Client {
+	clients := []*http.Client{{
+		Timeout:   6 * time.Second,
+		Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
+	}}
+	k, err := registry.OpenKey(registry.CURRENT_USER,
+		`Software\Microsoft\Windows\CurrentVersion\Internet Settings`, registry.QUERY_VALUE)
+	if err == nil {
+		defer k.Close()
+		en, _, _ := k.GetIntegerValue("ProxyEnable")
+		srv, _, _ := k.GetStringValue("ProxyServer")
+		if en == 1 && srv != "" {
+			if !strings.Contains(srv, "://") {
+				srv = "http://" + srv
+			}
+			if pu, perr := url.Parse(srv); perr == nil {
+				clients = append(clients, &http.Client{
+					Timeout:   6 * time.Second,
+					Transport: &http.Transport{Proxy: http.ProxyURL(pu)},
+				})
+			}
+		}
+	}
+	return clients
+}
+
+// directLatency times a plain TCP handshake: the idle-state stand-in for the
+// tunnel delay the status loop measures through mihomo. AliDNS first (it
+// answers where international anycast is filtered), then 1.1.1.1.
+func directLatency() int64 {
+	for _, addr := range []string{"223.5.5.5:443", "1.1.1.1:443"} {
+		start := time.Now()
+		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		if err != nil {
+			continue
+		}
+		_ = conn.Close()
+		return time.Since(start).Milliseconds()
+	}
+	return 0
+}
+
+// localLanIP returns the machine's LAN address (UDP connect does not send a
+// packet, it just resolves the outbound route).
+func localLanIP() string {
+	conn, err := net.DialTimeout("udp", "8.8.8.8:80", time.Second)
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+		return addr.IP.String()
+	}
+	return ""
+}
+
+// displayIP is what the home IP tile shows: the tunnel's exit once connected,
+// the machine's own LAN address before that.
+func (u *natUI) displayIP() string {
+	if u.m.connected {
+		if ip := strings.TrimSpace(u.m.status.ExitIP); ip != "" {
+			return ip
+		}
+	}
+	if u.m.localLan != "" {
+		return u.m.localLan
+	}
+	return u.m.localIP
+}
+
+// osRegionCC is the two-letter country of the Windows region setting, used as
+// the flag's fallback while idle: the public-IP probe needs a round trip, and a
+// card that shows a globe and a dash for the first seconds of every launch
+// looks broken next to one that already knows the machine is in CN.
+var (
+	regionOnce sync.Once
+	regionCC   string
+)
+
+func osRegionCC() string {
+	regionOnce.Do(func() {
+		k32 := windows.NewLazySystemDLL("kernel32.dll")
+		proc := k32.NewProc("GetUserDefaultGeoName")
+		if err := proc.Find(); err != nil {
+			return
+		}
+		buf := make([]uint16, 32)
+		n, _, _ := proc.Call(uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+		if int32(n) <= 0 {
+			return
+		}
+		name := windows.UTF16ToString(buf)
+		// "CN", or occasionally "CN|China": only the code is of interest.
+		if i := strings.IndexAny(name, "|,"); i > 0 {
+			name = name[:i]
+		}
+		if len(name) == 2 {
+			regionCC = strings.ToUpper(name)
+		}
+	})
+	return regionCC
+}
+
+// displayGeo is the country/city pair under the IP: exit geo when connected,
+// the machine's public-IP geo while idle.
+func (u *natUI) displayGeo() (cc, city string) {
+	if u.m.connected {
+		return u.m.status.Country, u.m.status.NodeCity
+	}
+	return u.m.localCC, u.m.localCity
+}
 
 // drawFlag paints a small flag chip for an ISO alpha-2 code with plain canvas
 // fills: stripes and a glyph approximate every flag traffic can realistically
@@ -1136,10 +1982,29 @@ func (u *natUI) drawFlag(c *walk.Canvas, x, y, w, h float64, cc string) {
 	star := func(col walk.Color, fx float64) {
 		u.textC(c, "★", u.f.f8, col, u.r(x+fx*w, y+2, w*0.45, h-4))
 	}
+	// starAt draws a five-pointed star as a body disc plus five thick rays.
+	// A ★ glyph at this size is a smudge, and GDI+ here has no polygon fill, so
+	// this is the smallest shape that still reads as "star" on a 40px flag —
+	// which is what the PRC flag needs five of, not one.
+	starAt := func(col walk.Color, cx, cy, r float64) {
+		u.circleFill(c, col, cx, cy, r*0.40)
+		for i := 0; i < 5; i++ {
+			ang := -math.Pi/2 + float64(i)*2*math.Pi/5
+			cs, sn := math.Cos(ang), math.Sin(ang)
+			u.thickLine(c, col, cx+cs*r*0.30, cy+sn*r*0.30, cx+cs*r, cy+sn*r, r*0.45)
+		}
+	}
 	switch cc {
 	case "CN":
+		// 五星红旗: one large star and four small ones on the arc that points at
+		// it, in the flag's own 30x20 unit grid.
 		u.fillRect(c, rx(238, 28, 37), u.r(x, y, w, h))
-		star(rx(255, 222, 0), 0.28)
+		u64 := w / 30
+		yellow := rx(255, 222, 0)
+		starAt(yellow, x+5*u64, y+5*u64, 3*u64)
+		for _, p := range [][2]float64{{10, 2}, {12, 4}, {12, 7}, {10, 9}} {
+			starAt(yellow, x+p[0]*u64, y+p[1]*u64, 1.1*u64)
+		}
 	case "SG":
 		stripes(rx(239, 51, 64), white)
 		star(rx(255, 222, 0), 0.05)

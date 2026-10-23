@@ -27,7 +27,7 @@ func renderChainConf(o options, endpoint string, run protoRun) string {
 	fmt.Fprintf(&b, "# using them. The inner tunnel only reaches the region it was scanned in\n")
 	fmt.Fprintf(&b, "# while its packets travel inside the outer one - routing that is the\n")
 	fmt.Fprintf(&b, "# client's job, not the config's.\n")
-	if o.ipv6 && warpAddressV6 == outerAddress(true) {
+	if o.ipFamily() != famV4 && warpAddressV6 == outerAddress(true) {
 		fmt.Fprintf(&b, "#\n# Both interfaces carry the same Address, which handshakes and then passes\n")
 		fmt.Fprintf(&b, "# nothing: this account file predates stored IPv6 addresses. Re-register.\n")
 	}
@@ -46,7 +46,7 @@ func renderChainConf(o options, endpoint string, run protoRun) string {
 	innerOpts := o
 	innerOpts.mtu = nestedMTU(o.mtu)
 	fmt.Fprintf(&b, "\n# --- inner: %s (%s), inside the tunnel above ---\n", endpoint, run.name)
-	b.WriteString(withChainAddr(o.ipv6, func() string { return renderIface(innerOpts, endpoint, run) }))
+	b.WriteString(withChainAddr(o.ipFamily() == famV6, func() string { return renderIface(innerOpts, endpoint, run) }))
 	return b.String()
 }
 
@@ -85,9 +85,12 @@ func renderIface(o options, endpoint string, run protoRun) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "[Interface]\n")
-	if o.ipv6 {
+	switch o.ipFamily() {
+	case famV6:
 		fmt.Fprintf(&b, "Address = %s/128\n", warpAddressV6)
-	} else {
+	case famBoth:
+		fmt.Fprintf(&b, "Address = %s/32, %s/128\n", warpAddress, warpAddressV6)
+	default:
 		fmt.Fprintf(&b, "Address = %s/32\n", warpAddress)
 	}
 	fmt.Fprintf(&b, "PrivateKey = %s\n", warpPrivateKey)
@@ -112,19 +115,24 @@ func renderIface(o options, endpoint string, run protoRun) string {
 	fmt.Fprintf(&b, "\n[Peer]\n")
 	fmt.Fprintf(&b, "PublicKey = %s\n", warpPublicKey)
 	fmt.Fprintf(&b, "Endpoint = %s\n", endpoint)
-	fmt.Fprintf(&b, "AllowedIPs = %s\n", allowedIPs(o.ipv6))
+	fmt.Fprintf(&b, "AllowedIPs = %s\n", strings.Join(allowedIPsList(o.ipFamily()), ", "))
 	fmt.Fprintf(&b, "PersistentKeepalive = %d\n", keepalive)
 
 	return b.String()
 }
 
-// Routing a family the interface carries no address for only blackholes it, so
-// AllowedIPs follows -6 the same way Address does.
-func allowedIPs(ipv6 bool) string {
-	if ipv6 {
-		return "::/0"
+// allowedIPsList is the routes a tunnel of this family claims. A family the
+// interface carries no address for only blackholes traffic, so the list follows
+// Address exactly.
+func allowedIPsList(family string) []string {
+	switch family {
+	case famV6:
+		return []string{"::/0"}
+	case famBoth:
+		return []string{"0.0.0.0/0", "::/0"}
+	default:
+		return []string{"0.0.0.0/0"}
 	}
-	return "0.0.0.0/0"
 }
 
 const confStdout = "-"
@@ -178,10 +186,14 @@ func confDNS(o options) string {
 	if o.dns != "" {
 		return o.dns
 	}
-	if o.ipv6 {
+	switch o.ipFamily() {
+	case famV6:
 		return warpDNSv6
+	case famBoth:
+		return warpDNSv4 + ", " + warpDNSv6
+	default:
+		return warpDNSv4
 	}
-	return warpDNSv4
 }
 
 // mihomo takes the resolvers as a list, the .conf as one line.
@@ -208,11 +220,17 @@ type kv struct {
 // Proxy names are the only scalars YAML has to quote.
 type quoted string
 
-func mihomoAddr(v4, v6 string, ipv6 bool) kv {
-	if ipv6 {
-		return kv{"ipv6", v6}
+// mihomoAddr carries the tunnel-side address(es). A dual-stack outbound names
+// both so mihomo can route each family through the same device.
+func mihomoAddr(v4, v6, family string) []kv {
+	switch family {
+	case famV6:
+		return []kv{{"ipv6", v6}}
+	case famBoth:
+		return []kv{{"ip", v4}, {"ipv6", v6}}
+	default:
+		return []kv{{"ip", v4}}
 	}
-	return kv{"ip", v4}
 }
 
 // mihomo lists proxies by name, so several warpscout configs pasted into one
@@ -277,6 +295,83 @@ func mihomoSocksProxy(port int) []kv {
 	}
 }
 
+// mihomoOpenVPNProxy renders one VPN Gate relay as a native openvpn outbound.
+// The PEM blocks are `quoted`, which both YAML and JSON turn into a single
+// escaped line — a raw multi-line string would fork the YAML document.
+func mihomoOpenVPNProxy(p ovpnProfile) []kv {
+	p = normalizeOVPNProfile(p)
+	out := []kv{
+		{k: "name", v: quoted(mihomoOpenVPNName)},
+		{k: "type", v: "openvpn"},
+		{k: "server", v: p.Remote},
+		{k: "port", v: p.Port},
+		{k: "proto", v: p.Proto},
+		{k: "dev", v: p.Dev},
+	}
+	if p.Cipher != "" {
+		out = append(out, kv{k: "cipher", v: p.Cipher})
+	}
+	if len(p.DataCiphers) > 0 {
+		out = append(out, kv{k: "data-ciphers", v: p.DataCiphers})
+	}
+	if p.Auth != "" {
+		out = append(out, kv{k: "auth", v: p.Auth})
+	}
+	if p.CA != "" {
+		out = append(out, kv{k: "ca", v: quoted(p.CA)})
+	}
+	if p.Cert != "" {
+		out = append(out, kv{k: "cert", v: quoted(p.Cert)})
+	}
+	if p.Key != "" {
+		out = append(out, kv{k: "key", v: quoted(p.Key)})
+	}
+	if p.TLSAuth != "" {
+		out = append(out, kv{k: "tls-auth", v: quoted(p.TLSAuth)})
+	}
+	if p.TLSCrypt != "" {
+		out = append(out, kv{k: "tls-crypt", v: quoted(p.TLSCrypt)})
+	}
+	if p.TLSCryptV2 != "" {
+		out = append(out, kv{k: "tls-crypt-v2", v: quoted(p.TLSCryptV2)})
+	}
+	if p.KeyDirection != "" {
+		out = append(out, kv{k: "key-direction", v: p.KeyDirection})
+	}
+	if p.CompLZO != "" {
+		out = append(out, kv{k: "comp-lzo", v: p.CompLZO})
+	}
+	if p.MTU > 0 {
+		out = append(out, kv{k: "mtu", v: p.MTU})
+	}
+	if p.Ping > 0 {
+		out = append(out, kv{k: "ping", v: p.Ping})
+	}
+	if p.PingRestart > 0 {
+		out = append(out, kv{k: "ping-restart", v: p.PingRestart})
+	}
+	// udp: true advertises the outbound's UDP relay capability to mihomo; it is
+	// not the transport (proto is). handshake-timeout is the outbound's own
+	// ceiling, detached from the inbound's 5s dial timeout.
+	return append(out,
+		kv{k: "udp", v: true},
+		kv{k: "handshake-timeout", v: openvpnHandshakeTimeout},
+	)
+}
+
+func normalizeOVPNProfile(p ovpnProfile) ovpnProfile {
+	if p.Dev == "" {
+		p.Dev = "tun"
+	}
+	if p.Proto != "udp" {
+		p.Proto = "tcp"
+	}
+	if p.CompLZO == "no" {
+		p.CompLZO = ""
+	}
+	return p
+}
+
 const (
 	// mihomoPsiphonName is the socks5 outbound (and, for clients, the exit).
 	mihomoPsiphonName = "Psiphon"
@@ -285,6 +380,16 @@ const (
 	mihomoBaseGroup = "WARP"
 	// mihomoExitGroup is the selector clients land on (Psiphon's socks5).
 	mihomoExitGroup = "PSIPHON"
+	// OpenVPN exit (V2): one native openvpn outbound chained behind the base
+	// protocol. The group and proxy names must differ — mihomo rejects a
+	// selector that lists itself ("loop is detected in ProxyGroup").
+	mihomoOpenVPNName  = "OpenVPN Exit"
+	mihomoOpenVPNGroup = "OPENVPN"
+	// openvpnHandshakeTimeout is the outbound's own ceiling. mihomo detaches it
+	// from the inbound dial timeout, so a slow public relay still completes the
+	// handshake while the first client request has already given up; the
+	// connect flow warms the tunnel with retries inside this window.
+	openvpnHandshakeTimeout = 20
 	// psiphonUnderlayPortGap is the offset of the dedicated SOCKS inbound that
 	// exists only for Psiphon's own dials. Routing that inbound to the base
 	// protocol — instead of relying on process detection — is what makes the
@@ -323,12 +428,24 @@ func mihomoProxies(o options, endpoint string, run protoRun) ([][]kv, error) {
 	// and the inner one dials through it. The outer carries no DNS - it is only
 	// the carrier, and the resolvers belong at the end of the chain.
 	outerName := mihomoName(outer.run) + mihomoOuterSuffix
+	renderOuter := func() ([]kv, error) {
+		return mihomoProxy(o, outerName, outer.endpoint, outer.run, o.mtu, nil)
+	}
 	var op []kv
-	err := withOuterKeys(func() error {
-		var err error
-		op, err = mihomoProxy(o, outerName, outer.endpoint, outer.run, o.mtu, nil)
-		return err
-	})
+	var err error
+	if outer.run.isMASQUE() {
+		// MASQUE in MASQUE: both hops authenticate with the same enrolled
+		// device, so the outer must NOT be rendered under the WireGuard
+		// account keys (withOuterKeys would hand mihomo an unrelated key pair
+		// and the outer tunnel would fail its CONNECT-IP request).
+		op, err = renderOuter()
+	} else {
+		err = withOuterKeys(func() error {
+			var rerr error
+			op, rerr = renderOuter()
+			return rerr
+		})
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -340,7 +457,13 @@ func mihomoProxies(o options, endpoint string, run protoRun) ([][]kv, error) {
 	// inner here would only make Cloudflare drop the inner tunnel's packets: it
 	// routes the 172.16.0.2 every WARP device is assigned, nothing else. The
 	// in-process scan nests two 172.16.0.2 netstacks the same way and works.
-	inner, err := mihomoProxy(o, mihomoName(run)+mihomoChainSuffix, endpoint, run, nestedMTU(o.mtu), confDNSList(o))
+	innerSuffix := mihomoChainSuffix
+	if outer.run.isMASQUE() {
+		// "MASQUE H3 WARP-in-MASQUE" tells the reader which hop type is nested;
+		// "-in-WARP" would describe a wwarp pair even when both hops are masque.
+		innerSuffix = "-in-MASQUE"
+	}
+	inner, err := mihomoProxy(o, mihomoName(run)+innerSuffix, endpoint, run, nestedMTU(o.mtu), confDNSList(o))
 	if err != nil {
 		return nil, err
 	}
@@ -475,7 +598,7 @@ func mihomoProxy(o options, name, endpoint string, run protoRun, mtu int, dns []
 		return nil, fmt.Errorf("endpoint %q: %w", endpoint, err)
 	}
 
-	p, err := mihomoPeer(run, o.ipv6, host, port)
+	p, err := mihomoPeer(run, o.ipFamily(), host, port)
 	if err != nil {
 		return nil, err
 	}
@@ -490,7 +613,7 @@ func mihomoProxy(o options, name, endpoint string, run protoRun, mtu int, dns []
 	return p, nil
 }
 
-func mihomoPeer(run protoRun, ipv6 bool, host string, port int) ([]kv, error) {
+func mihomoPeer(run protoRun, family string, host string, port int) ([]kv, error) {
 	if run.isMASQUE() {
 		if masqueAcct == nil {
 			return nil, fmt.Errorf("no MASQUE device in the account file")
@@ -505,12 +628,19 @@ func mihomoPeer(run protoRun, ipv6 bool, host string, port int) ([]kv, error) {
 		if run.isH2() {
 			p = append(p, kv{"network", "h2"})
 		}
-		return append(p,
+		p = append(p,
 			kv{"sni", masqueSNI},
 			kv{"private-key", masqueAcct.PrivateKey},
 			kv{"public-key", pub},
-			mihomoAddr(masqueAcct.IPv4, masqueAcct.IPv6, ipv6),
-		), nil
+		)
+		p = append(p, mihomoAddr(masqueAcct.IPv4, masqueAcct.IPv6, family)...)
+		// Fast-fail on the data plane: mihomo's masque outbound takes an
+		// integer handshake ceiling, and its default leaves a dark edge
+		// hanging for tens of seconds. 5s is inside the 3-5s band that
+		// Gool.txt's P0 asks for, and it is verified against this core:
+		// `handshake-timeout` is the one masque knob it actually parses
+		// (idle-timeout / keepalive are accepted but ignored).
+		return append(p, kv{"handshake-timeout", 5}), nil
 	}
 
 	// The single-peer fields mihomo still accepts at the top level are its legacy
@@ -519,15 +649,15 @@ func mihomoPeer(run protoRun, ipv6 bool, host string, port int) ([]kv, error) {
 		{"server", host},
 		{"port", port},
 		{"public-key", warpPublicKey},
-		{"allowed-ips", []string{allowedIPs(ipv6)}},
+		{"allowed-ips", allowedIPsList(family)},
 		{"persistent-keepalive", keepalive},
 	}
 	p := []kv{
 		{"type", "wireguard"},
 		{"private-key", warpPrivateKey},
-		mihomoAddr(warpAddress, warpAddressV6, ipv6),
-		{"peers", [][]kv{peer}},
 	}
+	p = append(p, mihomoAddr(warpAddress, warpAddressV6, family)...)
+	p = append(p, kv{"peers", [][]kv{peer}})
 	if !run.isAWG() {
 		return p, nil
 	}

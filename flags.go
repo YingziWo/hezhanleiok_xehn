@@ -68,6 +68,7 @@ type options struct {
 
 	// Client-core settings (connect / disconnect / status).
 	tunMode   bool
+	allowLan  bool
 	mixedPort int
 	apiPort   int
 	corePath  string
@@ -75,20 +76,19 @@ type options struct {
 	topN      int
 	pick      string
 	noProxy   bool
-	// Split tunnelling: splitMode is off|proxy|direct and splitApps the
-	// process names it applies to (splitProxy = only these use the tunnel,
-	// splitDirect = these bypass it). Set by the settings page; there are no
-	// flags for it yet, and off/empty means "everything uses the tunnel".
-	splitMode string
-	splitApps []string
-	// Routing (set by the settings page, no flags yet): proxyMode is the core's
-	// `mode:`, the domain lists become DOMAIN-SUFFIX rules, and geoSplit adds
-	// the region split — which the renderer only emits when the core actually
-	// has its geo data.
+	// family is the tunnel address family (v4/v6/both). Empty means v4 for the
+	// CLI; ipv6 stays the endpoint-pool selector -6 has always meant.
+	family string
+	// Routing (set by the settings page, no flags yet): proxyMode is the
+	// routing preset, the domain lists become DOMAIN-SUFFIX rules, and the
+	// bypass preset adds the region split — which the renderer only emits when
+	// the core actually has its geo data.
 	proxyMode    string
 	domainDirect []string
 	domainProxy  []string
-	geoSplit     bool
+	// dnsLeak routes resolver queries through the tunnel and, in TUN mode,
+	// requests the core hijack port 53.
+	dnsLeak bool
 	// noGuard turns off the background health guard: the session runs, but
 	// nothing rebuilds it if it breaks.
 	noGuard bool
@@ -104,6 +104,23 @@ type options struct {
 	psiphonMode      bool
 	psiphonExe       string
 	psiphonSocksPort int
+	// psiphonRegion is the Psiphon egress region: an ISO alpha-2 hint the
+	// Psiphon core honours via its EgressRegion config field. Empty (the
+	// default) means "automatic" — Psiphon picks whatever server it likes.
+	psiphonRegion string
+
+	// OpenVPN exit (V2): mihomo's native openvpn outbound, chained behind the
+	// base protocol via dialer-proxy and pointed at one VPN Gate relay.
+	// openvpnNode is filled by the connect pipeline (or restored from state by
+	// the health guard); openvpnRegion is the ISO alpha-2 preference ("" = the
+	// fastest reachable node).
+	openvpnMode   bool
+	openvpnRegion string
+	// openvpnNodePin is the user's explicit relay pick from the node picker
+	// (country-ip-port). The connect pipeline still rotates past it on failure;
+	// it only decides which node is tried first.
+	openvpnNodePin string
+	openvpnNode    *vpnGateNode
 
 	// coreLog, set by the GUIs, receives a copy of the core process's
 	// stdout/stderr for the log panel. Never a flag.
@@ -113,6 +130,20 @@ type options struct {
 	// endpoint itself (as opposed to a -through the user asked for), so the
 	// fresh-scan retry knows it may re-pick it. Never a flag.
 	outerAutoPicked bool
+}
+
+// ipFamily resolves the tunnel's address family. The CLI's -6 has always meant
+// "v6 endpoints, v6 tunnel", so it doubles as the family when no explicit one
+// was set.
+func (o options) ipFamily() string {
+	switch o.family {
+	case famV4, famV6, famBoth:
+		return o.family
+	}
+	if o.ipv6 {
+		return famV6
+	}
+	return famV4
 }
 
 type flagSpec struct {
@@ -160,7 +191,7 @@ var (
 	}}
 
 	protoGroup = flagGroup{"Protocol", []flagSpec{
-		{"p", "proto", "wg|awg|wwarp|masque|masque-h2", "tunnel protocol: wg (WireGuard), awg (AmneziaWG), wwarp (WARP-in-WARP: two wg/awg outbounds chained via dialer-proxy), masque (CONNECT-IP over HTTP/3/QUIC) or masque-h2 (CONNECT-IP over HTTP/2/TCP)"},
+		{"p", "proto", "wg|awg|wwarp|masque|masque-h2|masque-mm", "tunnel protocol: wg (WireGuard), awg (AmneziaWG), wwarp (WARP-in-WARP: two wg/awg outbounds chained via dialer-proxy), masque (CONNECT-IP over HTTP/3/QUIC), masque-h2 (CONNECT-IP over HTTP/2/TCP) or masque-mm (MASQUE in MASQUE: an H3 CONNECT-IP tunnel dialled from inside another one, so the exit address is the inner tunnel's)"},
 	}}
 
 	awgGroup = flagGroup{"AmneziaWG obfuscation parameters", []flagSpec{
@@ -231,6 +262,8 @@ var (
 		{"", "no-proxy", "", "skip the WinINET system-proxy step; apps reach the tunnel via the mixed port directly"},
 		{"", "psiphon", "", "Psiphon exit (V1): bring the base protocol up first, then exit through a local Psiphon sidecar (the final IP becomes Psiphon's)"},
 		{"", "psiphon-exe", "PATH", "path to the Psiphon executable (else PSIPHON_EXE env or <coreDir>/psiphon.exe)"},
+		{"", "openvpn", "", "OpenVPN exit (V2): chain a VPN Gate relay behind the base protocol (IPv4 only; wins over --psiphon)"},
+		{"", "openvpn-region", "ISO", "preferred VPN Gate exit country (ISO alpha-2, empty = fastest reachable node)"},
 		{"", "top", "N", "reserved: number of top endpoints to keep in the cache"},
 	}}
 
@@ -431,6 +464,8 @@ func setupConnectFlags(fs *flag.FlagSet, o *options) {
 	// location (else PSIPHON_EXE env or <coreDir>/psiphon.exe).
 	fs.BoolVar(&o.psiphonMode, "psiphon", false, "")
 	fs.StringVar(&o.psiphonExe, "psiphon-exe", "", "")
+	fs.BoolVar(&o.openvpnMode, "openvpn", false, "")
+	fs.StringVar(&o.openvpnRegion, "openvpn-region", "", "")
 	o.wantMeta = true
 }
 

@@ -33,14 +33,40 @@ func BinaryVersion(bin string) (string, error) {
 // number whether an outbound type exists, the actual binary parses a minimal
 // per-protocol config and answers.
 func TestConfig(bin, workDir string, configYAML []byte) error {
+	ok, _, err := TestConfigDetail(bin, workDir, configYAML)
+	if !ok {
+		return err
+	}
+	return nil
+}
+
+// TestConfigDetail is TestConfig with the two failure modes separated:
+//
+//	ok  — the core accepted the config
+//	ran — the probe actually reached the core
+//
+// A probe that could not run at all (the temp file could not be created, the
+// binary could not be executed, a scanner locked it) must not be reported as
+// "this core does not support the protocol": that answer sends the user off to
+// re-download a core that is perfectly fine, and blocks the connect. Only
+// ran && !ok is a real rejection.
+//
+// The YAML is written to the system temp directory rather than workDir: the
+// core directory can be read-only (Program Files), can be watched by security
+// software, and is not ours to litter with probe files.
+func TestConfigDetail(bin, workDir string, configYAML []byte) (ok, ran bool, err error) {
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		return err
+		return false, false, err
 	}
-	probe := filepath.Join(workDir, "capability-probe.yaml")
-	if err := os.WriteFile(probe, configYAML, 0o600); err != nil {
-		return err
+	dir, terr := os.MkdirTemp("", "warp-probe")
+	if terr != nil {
+		return false, false, terr
 	}
-	defer os.Remove(probe)
+	defer os.RemoveAll(dir)
+	probe := filepath.Join(dir, "probe.yaml")
+	if werr := os.WriteFile(probe, configYAML, 0o600); werr != nil {
+		return false, false, werr
+	}
 
 	cmd := exec.Command(bin, "-t", "-d", workDir, "-f", probe)
 	hideConsole(cmd)
@@ -53,7 +79,12 @@ func TestConfig(bin, workDir string, configYAML []byte) error {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return fmt.Errorf("%s", msg)
+		// No output at all means the child never ran (missing binary, exec
+		// failure): that is infrastructure, not a rejected config.
+		if strings.TrimSpace(string(out)) == "" {
+			return false, false, fmt.Errorf("%s", msg)
+		}
+		return false, true, fmt.Errorf("%s", msg)
 	}
-	return nil
+	return true, true, nil
 }

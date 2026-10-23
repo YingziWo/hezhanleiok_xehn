@@ -189,14 +189,28 @@ func judgeHealth(fails int, ok bool) healthVerdict {
 }
 
 // checkDataPlane asks the question status used to assume the answer to: does a
-// real HTTPS request through the local mixed port complete right now?
-func checkDataPlane(mixedPort int) healthResult {
+// real HTTPS request through the local mixed port complete right now? A v6-only
+// session is probed against a v6 literal, because its public sources are v4
+// hostnames that the tunnel intentionally cannot reach.
+func checkDataPlane(mixedPort int, family string) healthResult {
 	if mixedPort <= 0 {
 		return healthResult{Err: fmt.Errorf("no mixed port in state")}
 	}
-	probe, err := fetchExitProbe(mixedPort)
+	if family == famV6 {
+		ip, err := fetchV6Probe(mixedPort)
+		if err != nil {
+			return healthResult{Err: err}
+		}
+		return healthResult{OK: true, ExitIP: ip}
+	}
+	probe, err := fetchSessionProbe(mixedPort, family)
 	if err != nil {
 		return healthResult{Err: err}
+	}
+	if family == famBoth {
+		if _, err := fetchV6Probe(mixedPort); err != nil {
+			return healthResult{Err: fmt.Errorf("IPv6: %w", err)}
+		}
 	}
 	return healthResult{OK: true, ExitIP: probe.ExitIP}
 }
@@ -232,6 +246,31 @@ func optionsFromState(st clientState) options {
 	// cache on it, so guessing v4 here silently no-ops the eviction of a v6
 	// endpoint and repairs onto it forever.
 	opts.ipv6 = endpointIsV6(st.Endpoint)
+	opts.family = st.Family
+	switch opts.family {
+	case famV4, famV6, famBoth:
+	default:
+		opts.family = famV4
+		if opts.ipv6 {
+			opts.family = famV6
+		}
+	}
+	opts.allowLan = st.AllowLan
+	// A Psiphon session re-launches its exit with the same region it was
+	// started with, so a repair never swaps the user's chosen country.
+	opts.psiphonRegion = st.PsiphonRegion
+	// An OpenVPN session must come back as the SAME kind of session: without the
+	// exit descriptor a repair would rebuild the bare underlay and silently
+	// drop the relay the user picked.
+	if st.OpenVPNMode {
+		opts.openvpnMode = true
+		opts.openvpnRegion = st.OpenVPNRegion
+		opts.openvpnNode = st.OpenVPNNode
+		// The relay is IPv4-only; a v6 endpoint family would fail verification
+		// on a chain that can never carry it.
+		opts.ipv6 = false
+		opts.family = famV4
+	}
 	return opts
 }
 
@@ -427,6 +466,7 @@ func repairOnce(ctx context.Context, opts options, dead string, tried map[string
 				BaseConfigPath: baseConfig,
 				Upstream:       fmt.Sprintf("socks5://127.0.0.1:%d", underlaySocksPort(opts.mixedPort)),
 				SocksPort:      psPort,
+				EgressRegion:   opts.psiphonRegion,
 			}
 			ps = &Psiphon{}
 			afterReady = func() error {
@@ -477,6 +517,126 @@ func repairOnce(ctx context.Context, opts options, dead string, tried map[string
 		tried[ce.Endpoint] = true
 		markEndpointDead(opts, ce)
 		logf(fmt.Sprintf("端点 %s 修复失败: %v", ce.Endpoint, serr))
+	}
+	return clientState{}, false
+}
+
+// repairOpenVPNOnce rebuilds a session whose final egress is a VPN Gate relay.
+// The relay is the likely fault — public nodes churn within hours, while a
+// scan-verified WARP endpoint usually stays up — so it is rotated first; the
+// underlay endpoint is only rotated when every relay fails on it.
+//
+// Base endpoints are never marked dead here: a relay that cannot handshake says
+// nothing about the tunnel underneath it, and evicting healthy WARP endpoints
+// on a VPN Gate outage would poison the scan cache.
+func repairOpenVPNOnce(ctx context.Context, st clientState, logf func(string)) (clientState, bool) {
+	cDir, err := coreDir()
+	if err != nil {
+		logf(fmt.Sprintf("修复失败：无法定位核心目录：%v", err))
+		return clientState{}, false
+	}
+	opts := optionsFromState(st)
+	opts.openvpnNode = nil
+	bin, err := core.EnsureBinary(cDir, opts.corePath)
+	if err != nil {
+		logf(fmt.Sprintf("修复失败：核心不可用：%v", err))
+		return clientState{}, false
+	}
+	results, run, err := runCachedScan(ctx, opts)
+	if err != nil {
+		logf(fmt.Sprintf("修复失败：无法获取端点列表：%v", err))
+		return clientState{}, false
+	}
+	// Forced refresh: the relay pool is the thing being repaired, and re-picking
+	// from the same cached list would walk straight back into the dead nodes.
+	nodes, err := vpnGateNodesFor(ctx, results, run, true)
+	if err != nil {
+		logf(fmt.Sprintf("修复失败：无法获取 VPN Gate 节点：%v", err))
+		return clientState{}, false
+	}
+	// Respect the user's pin: a residential pick rotates through the other
+	// residential relays first, exactly like the picker promised; the phone
+	// client's class order is what fills the rest of the list.
+	pin := loadSettings().OpenVPNNode
+	relays := vpnGateCandidates(ctx, nodes, opts.openvpnRegion, pin, vpnGateConnectNodes)
+	if len(relays) == 0 {
+		logf("修复失败：VPN Gate 没有可用节点")
+		return clientState{}, false
+	}
+	// Anything but the relay already in use comes first; the old one is kept as
+	// the last resort so a transient failure does not lose a working session.
+	if st.OpenVPNNode != nil {
+		cur := st.OpenVPNNode.id()
+		var ordered []vpnGateNode
+		for _, n := range relays {
+			if n.id() != cur {
+				ordered = append(ordered, n)
+			}
+		}
+		ordered = append(ordered, *st.OpenVPNNode)
+		relays = ordered
+	}
+
+	// The current base endpoint gets the first turn (the relay is the suspect),
+	// then the cached alternatives.
+	var bases []cachedEndpoint
+	for _, ce := range results {
+		if ce.Endpoint == st.Endpoint && ce.Working {
+			bases = append(bases, ce)
+			break
+		}
+	}
+	if len(bases) == 0 && st.Endpoint != "" {
+		bases = append(bases, cachedEndpoint{Endpoint: st.Endpoint})
+	}
+	bases = append(bases, nextCandidates(results, map[string]bool{st.Endpoint: true}, connectMaxAttempts)...)
+	if len(bases) == 0 {
+		logf("修复失败：无可用基础端点")
+		return clientState{}, false
+	}
+
+	const maxAttempts = 4
+	attempts := 0
+	for _, ce := range bases {
+		for i := range relays {
+			if attempts >= maxAttempts || ctx.Err() != nil {
+				return clientState{}, false
+			}
+			if cur, cerr := loadState(); cerr == nil && !cur.Connected {
+				logf("会话已断开，中止修复")
+				return clientState{}, false
+			}
+			attempts++
+			node := relays[i]
+			opts.openvpnNode = &node
+			logf(fmt.Sprintf("切换出口 %s（%s），基础端点 %s（第 %d/%d 次）…",
+				node.id(), node.CountryShort, ce.Endpoint, attempts, maxAttempts))
+			if prev, serr := loadState(); serr == nil {
+				if kerr := stopRecordedCore(prev); kerr != nil {
+					logf(fmt.Sprintf("停止旧核心失败: %v", kerr))
+				}
+			}
+			state, serr := startAndVerify(ctx, opts, ce, run, bin, cDir, "OpenVPN", nil)
+			if serr != nil {
+				if !strings.Contains(serr.Error(), "base endpoint") {
+					markVPNGateFailed(node.id())
+				}
+				logf(fmt.Sprintf("出口 %s 修复失败: %v", node.id(), serr))
+				continue
+			}
+			clearVPNGateFailure(node.id())
+			rememberLastGoodVPNGate(node)
+			if cur, cerr := loadState(); cerr == nil && !cur.Connected {
+				logf("会话已断开，回滚刚启动的核心")
+				rollbackRepair(state, logf)
+				return clientState{}, false
+			}
+			if saveState(state) != nil {
+				logf("状态保存失败")
+			}
+			logf("已切换到 VPN Gate " + node.id())
+			return state, true
+		}
 	}
 	return clientState{}, false
 }
@@ -537,6 +697,9 @@ func giveUp(logf func(string)) {
 		prev.PsiphonMode = false
 		prev.PsiphonPID = 0
 		prev.PsiphonSocksPort = 0
+		prev.OpenVPNMode = false
+		prev.OpenVPNRegion = ""
+		prev.OpenVPNNode = nil
 		_ = saveState(prev)
 	}
 	logf("已断开：请重新点击连接（会重新扫描端点）")
@@ -606,7 +769,7 @@ func runHealthGuardCmd(ctx context.Context, opts options) error {
 			logf("系统代理已不再指向本端口，退出守护")
 			return nil
 		}
-		res := checkDataPlane(st.MixedPort)
+		res := checkDataPlane(st.MixedPort, st.Family)
 		if verdict := judgeHealth(fails, res.OK); !verdict.repair {
 			fails = verdict.fails
 			if res.OK {
@@ -621,6 +784,26 @@ func runHealthGuardCmd(ctx context.Context, opts options) error {
 			continue
 		}
 		logf(fmt.Sprintf("数据面探测失败 (%d/%d): %v", healthFailLimit, healthFailLimit, res.Err))
+		// An OpenVPN session is repaired by rotating the VPN Gate relay, not by
+		// rotating the underlay: the relay is the part that churns, and a bare
+		// WARP re-connect would silently drop the exit the user chose.
+		if st.OpenVPNMode {
+			if fe := ctx.Err(); fe != nil {
+				return nil
+			}
+			logf("OpenVPN 出口失效：更换 VPN Gate 节点并重建会话…")
+			if _, ok := repairOpenVPNOnce(ctx, st, logf); ok {
+				fails = 0
+				continue
+			}
+			if done, derr := loadState(); derr == nil && !done.Connected {
+				logf("会话已由用户断开，退出守护")
+				return nil
+			}
+			logf("没有可用的 VPN Gate 节点，结束会话")
+			giveUp(logf)
+			return nil
+		}
 		// A Psiphon session is repaired by RESTARTING Psiphon, never by rotating
 		// the WARP underlay: the latter would silently swap the final exit back
 		// to WARP, which is exactly the mis-route this branch exists to avoid.
@@ -681,7 +864,7 @@ func runHealthGuardCmd(ctx context.Context, opts options) error {
 			logf(fmt.Sprintf("underlay 正常，重启 Psiphon 出口（第 %d/%d 次）…", psiphonRestarts, psiphonRestartLimit))
 			if perr := restartPsiphon(ctx, st, logf); perr != nil {
 				logf("重启 Psiphon 失败: " + perr.Error())
-			} else if r := checkDataPlane(st.MixedPort); r.OK {
+			} else if r := checkDataPlane(st.MixedPort, st.Family); r.OK {
 				logf("Psiphon 重启后数据面已恢复")
 				psiphonRestarts = 0
 			} else {

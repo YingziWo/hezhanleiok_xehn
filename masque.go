@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"sync"
 	"time"
 
@@ -31,10 +32,18 @@ import (
 // not importable). The SNI never matches the endpoint address, which is why
 // usque pins the peer's public key instead of verifying the certificate.
 const (
-	masqueConnectURI  = "https://cloudflareaccess.com"
-	masqueDefaultSNI  = "consumer-masque.cloudflareclient.com"
-	masqueKeepalive   = 30 * time.Second
-	masqueIdleTimeout = 5 * time.Second
+	masqueConnectURI = "https://cloudflareaccess.com"
+	masqueDefaultSNI = "consumer-masque.cloudflareclient.com"
+	// Keepalive sits below the common NAT idle timeout (30-120s) with room to
+	// spare: 20s is the value Cloudflare's own client converges on, and it is
+	// what keeps a quiet tunnel from being silently dropped by the middlebox.
+	masqueKeepalive = 20 * time.Second
+	// The QUIC session outlives one request: idle timeout starts generous and
+	// ADAPTS. A 5s ceiling (the old value) meant a tunnel died whenever the
+	// page went quiet for a moment, and every death re-handshaked from zero —
+	// the "connected, then nothing loads" pattern.
+	masqueIdleBase = 30 * time.Second
+	masqueIdleMax  = 120 * time.Second
 	// Cloudflare never signs the client certificate: it only carries the key
 	// enrolled through the API, and that enrolment is the whole authentication.
 	masqueCertLifetime = 24 * time.Hour
@@ -97,6 +106,45 @@ var masqueRoundTargets = len(masquePoolsV4) * len(masqueEndpointPorts)
 
 // Set by applyAccount, like warpPrivateKey for the WireGuard family.
 var masqueAcct *masqueAccount
+
+// Adaptive idle timeout, in the spirit of the official client's "increase idle
+// timeout on unhealthy disconnect / reset on healthy disconnect".
+//
+//	A connection that dies while idle is a path problem (NAT mapping reaped,
+//	Wi-Fi sleep), and reconnecting on the same short budget just reproduces the
+//	same death. Raising the ceiling keeps a quiet session alive longer; a
+//	session that then survives a healthy while proves the path is fine again
+//	and the ceiling drops back to base, so a genuinely dead path still fails
+//	fast instead of hanging on for two minutes.
+var (
+	masqueIdleMu   sync.Mutex
+	masqueIdleCur  = masqueIdleBase
+	masqueFastFail = 4 * time.Second // per-attempt handshake ceiling (Gool.txt P0)
+)
+
+func masqueIdleTimeout() time.Duration {
+	masqueIdleMu.Lock()
+	defer masqueIdleMu.Unlock()
+	return masqueIdleCur
+}
+
+// noteMasqueUnhealthy raises the idle ceiling after a session died mid-flight.
+func noteMasqueUnhealthy() {
+	masqueIdleMu.Lock()
+	defer masqueIdleMu.Unlock()
+	next := masqueIdleCur + masqueIdleCur/2
+	if next > masqueIdleMax {
+		next = masqueIdleMax
+	}
+	masqueIdleCur = next
+}
+
+// noteMasqueHealthy drops it back after a session proved it can carry traffic.
+func noteMasqueHealthy() {
+	masqueIdleMu.Lock()
+	defer masqueIdleMu.Unlock()
+	masqueIdleCur = masqueIdleBase
+}
 
 // -masque-attempts overrides this.
 var masqueAttempts = masqueDefaultAttempts
@@ -348,6 +396,16 @@ type masqueTunnel struct {
 	mu   sync.Mutex
 	conn *connectip.Conn
 	drop func()
+	// peer is the endpoint the live connection belongs to: a second handshake
+	// against the same peer is wasted work, a different one is a real swap.
+	peer string
+}
+
+// samePeer reports whether the live connection already serves this endpoint.
+func (t *masqueTunnel) samePeer(endpoint string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.conn != nil && t.peer == endpoint
 }
 
 // quic-go and connect-ip-go write straight to the standard logger - a receive
@@ -396,6 +454,7 @@ func (t *masqueTunnel) dropPeer() {
 		t.drop = nil
 	}
 	t.conn = nil
+	t.peer = ""
 }
 
 func (t *masqueTunnel) currentConn() *connectip.Conn {
@@ -440,20 +499,83 @@ func (t *masqueTunnel) pumpIn(ctx context.Context, conn *connectip.Conn) {
 // ConnectTunnel dispatches on the address type, not on the useHTTP2 flag alone:
 // HTTP/2 needs a TCPAddr and HTTP/3 a UDPAddr.
 func (t *masqueTunnel) resolveEndpoint(endpoint string) (net.Addr, error) {
-	if t.h2 {
-		return net.ResolveTCPAddr("tcp", endpoint)
+	host, portStr, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return nil, err
 	}
-	return net.ResolveUDPAddr("udp", endpoint)
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, err
+	}
+	// An IP literal never touches the resolver: that is the normal case (the
+	// pools are addresses), and it must stay allocation- and DNS-free.
+	addr, err := resolveFast(context.Background(), host)
+	if err != nil {
+		return nil, err
+	}
+	if t.h2 {
+		return &net.TCPAddr{IP: net.IP(addr.AsSlice()), Port: port}, nil
+	}
+	return &net.UDPAddr{IP: net.IP(addr.AsSlice()), Port: port}, nil
+}
+
+// resolveFast turns a host into one address, asking for both families in
+// parallel (Gool.txt P0: "并行 DNS + Happy Eyeballs"). Go's LookupNetIP issues
+// the A and AAAA queries concurrently, which is the part that matters on a
+// network where one family is black-holed; the system resolver is serial and
+// can spend 20-30s on the dead one before answering.
+//
+// IPv4 is preferred when both answer: the endpoint pools are v4 by default, and
+// a v6-only path through a home router is the far more common failure.
+func resolveFast(ctx context.Context, host string) (netip.Addr, error) {
+	if a, err := netip.ParseAddr(host); err == nil {
+		return a, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil || len(addrs) == 0 {
+		if err == nil {
+			err = fmt.Errorf("no address for %s", host)
+		}
+		return netip.Addr{}, err
+	}
+	best := addrs[0]
+	for _, a := range addrs {
+		if a.Is4() {
+			best = a
+			break
+		}
+	}
+	return best, nil
 }
 
 // A successful dial is the MASQUE equivalent of the WireGuard handshake, but a
 // weaker signal: measured on a filtered network, every endpoint dialled and only
 // two passed data, so callers must still verify with /meta or a ping.
 func (t *masqueTunnel) handshake(ctx context.Context, endpoint string, timeout time.Duration) bool {
+	// Session reuse, the client-side half of "reuse the CID/session instead of
+	// a full handshake": asking the same peer for a second tunnel while the
+	// first is still up only costs a fresh CONNECT-IP exchange (and, on a
+	// filtered path, another chance to be dropped).
+	if t.samePeer(endpoint) {
+		return true
+	}
 	t.dropPeer()
+
+	// Fast-fail: a per-attempt ceiling in the 3-5s band. The old behaviour
+	// inherited whatever the caller passed, which for a chained scan is the
+	// whole scan budget — one dark endpoint could eat it.
+	if timeout > masqueFastFail {
+		timeout = masqueFastFail
+	}
+	if timeout < time.Second {
+		timeout = time.Second
+	}
 
 	remote, err := t.resolveEndpoint(endpoint)
 	if err != nil {
+		noteMasqueUnhealthy()
 		return false
 	}
 	// The deadline may only bound the dial: over HTTP/2 the CONNECT-IP stream is
@@ -466,11 +588,19 @@ func (t *masqueTunnel) handshake(ctx context.Context, endpoint string, timeout t
 	// wait - measured, the dial returned after quic-go's own MaxIdleTimeout every
 	// time. Both are set anyway, one per stall.
 	udpConn, tr, conn, _, err := api.ConnectTunnel(dialCtx, t.tlsCfg,
-		&quic.Config{EnableDatagrams: true, KeepAlivePeriod: masqueKeepalive, HandshakeIdleTimeout: timeout, MaxIdleTimeout: masqueIdleTimeout},
+		&quic.Config{
+			EnableDatagrams:      true,
+			KeepAlivePeriod:      masqueKeepalive,
+			HandshakeIdleTimeout: timeout,
+			// Adaptive: grows after a session dies mid-flight, back to base once
+			// a tunnel has proved it can carry traffic.
+			MaxIdleTimeout: masqueIdleTimeout(),
+		},
 		masqueConnectURI, remote, t.h2)
 	if err != nil || !dialDeadline.Stop() {
 		cancelDial()
 		closeMasqueTransport(udpConn, tr, conn)
+		noteMasqueUnhealthy()
 		return false
 	}
 
@@ -479,12 +609,15 @@ func (t *masqueTunnel) handshake(ctx context.Context, endpoint string, timeout t
 
 	t.mu.Lock()
 	t.conn = conn
+	t.peer = endpoint
 	t.drop = func() {
 		cancelPump()
 		cancelDial()
 		closeMasqueTransport(udpConn, tr, conn)
 	}
 	t.mu.Unlock()
+	// A completed CONNECT-IP exchange is the healthy signal this layer has.
+	noteMasqueHealthy()
 	return true
 }
 

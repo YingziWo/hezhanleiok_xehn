@@ -1,13 +1,59 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
+	"math/big"
+	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/xhwarp/warp-client/internal/core"
 )
+
+// probeOpenVPNProto is the capability name for the native openvpn outbound. It
+// is not a protoRun (the base protocol still carries it), so the probe list
+// appends it explicitly.
+const probeOpenVPNProto = "openvpn"
+
+// probePEMCredentials builds one throwaway self-signed pair. The OpenVPN
+// outbound parses ca/cert/key while loading the config (`mihomo -t`), so the
+// probe needs real PEM, not placeholders; a one-hour leaf under its own CA is
+// enough and costs one ECDSA keygen.
+func probePEMCredentials() (caPEM, certPEM, keyPEM string, err error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return "", "", "", err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "warp-probe"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		return "", "", "", err
+	}
+	keyDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		return "", "", "", err
+	}
+	cert := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	key := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
+	return cert, cert, key, nil
+}
 
 // Capability probing: the UI must not offer a protocol the running mihomo
 // cannot parse. Rather than mapping versions to feature flags by hand (which
@@ -80,20 +126,59 @@ func probeYAML(proto string) (string, error) {
 		b.WriteString("rules:\n  - MATCH,PROBE INNER\n")
 		return b.String(), nil
 
-	case protoMASQUE, protoMASQUEH2:
+	case protoMASQUE, protoMASQUEH2, protoMASQUEMASQUE:
 		privDER, pubDER, err := genECKeyPair()
 		if err != nil {
 			return "", err
 		}
-		var b strings.Builder
-		b.WriteString("proxies:\n  - name: \"PROBE\"\n    type: masque\n    server: 162.159.198.2\n    port: 443\n")
-		if proto == protoMASQUEH2 {
-			b.WriteString("    network: h2\n")
+		// One masque outbound. The probe only has to be parseable, so the
+		// address, the keys and the SNI are throwaway values of the right shape.
+		proxy := func(name, ip string, extra ...string) string {
+			var b strings.Builder
+			fmt.Fprintf(&b, "  - name: %q\n    type: masque\n    server: 162.159.198.2\n    port: 443\n", name)
+			if proto == protoMASQUEH2 {
+				b.WriteString("    network: h2\n")
+			}
+			fmt.Fprintf(&b, "    sni: %s\n    private-key: %s\n    public-key: %s\n",
+				masqueSNI, base64.StdEncoding.EncodeToString(privDER), base64.StdEncoding.EncodeToString(pubDER))
+			fmt.Fprintf(&b, "    ip: %s\n    udp: true\n    remote-dns-resolve: true\n    dns: ['1.1.1.1']\n", ip)
+			for _, e := range extra {
+				b.WriteString(e)
+			}
+			return b.String()
 		}
-		fmt.Fprintf(&b, "    sni: %s\n    private-key: %s\n    public-key: %s\n",
-			masqueSNI, base64.StdEncoding.EncodeToString(privDER), base64.StdEncoding.EncodeToString(pubDER))
-		b.WriteString("    ip: 172.16.0.2\n    udp: true\n    remote-dns-resolve: true\n    dns: ['1.1.1.1']\n")
+		var b strings.Builder
+		b.WriteString("proxies:\n")
+		if proto == protoMASQUEMASQUE {
+			// MASQUE in MASQUE: the outer hop carries the inner one, which is
+			// exactly the field the render adds; probing it here is what proves
+			// this core can take the nested pair at all.
+			b.WriteString(proxy("PROBE OUTER", "172.16.0.2"))
+			b.WriteString(proxy("PROBE INNER", "172.16.0.2", "    dialer-proxy: \"PROBE OUTER\"\n"))
+			b.WriteString("rules:\n  - MATCH,PROBE INNER\n")
+			return b.String(), nil
+		}
+		b.WriteString(proxy("PROBE", "172.16.0.2"))
 		b.WriteString("rules:\n  - MATCH,PROBE\n")
+		return b.String(), nil
+
+	case probeOpenVPNProto:
+		// Exactly the connect render: base outbound, then an openvpn outbound
+		// chained onto it with dialer-proxy and the same field set.
+		ca, cert, key, err := probePEMCredentials()
+		if err != nil {
+			return "", err
+		}
+		var b strings.Builder
+		b.WriteString("proxies:\n  - name: \"PROBE BASE\"\n    type: wireguard\n")
+		b.WriteString("    private-key: " + probeWGPrivateKey + "\n    ip: 172.16.0.2\n")
+		b.WriteString(wgPeer("    "))
+		b.WriteString("    mtu: 1280\n    udp: true\n")
+		b.WriteString("  - name: \"PROBE OPENVPN\"\n    type: openvpn\n")
+		b.WriteString("    server: 127.0.0.1\n    port: 1194\n    proto: tcp\n    dev: tun\n")
+		fmt.Fprintf(&b, "    ca: %q\n    cert: %q\n    key: %q\n", ca, cert, key)
+		b.WriteString("    udp: true\n    handshake-timeout: 20\n    dialer-proxy: \"PROBE BASE\"\n")
+		b.WriteString("rules:\n  - MATCH,PROBE OPENVPN\n")
 		return b.String(), nil
 	}
 	return "", fmt.Errorf("no probe for proto %q", proto)
@@ -104,6 +189,15 @@ func probeYAML(proto string) (string, error) {
 // "please upgrade the core", which is the honest safe answer.
 func protoSupportedBy(bin, workDir, proto string) bool {
 	_, supported, _ := probeCoreCapabilities(bin, workDir)
+	if os.Getenv("WARP_PROBE_DEBUG") != "" {
+		y, yerr := probeYAML(proto)
+		terr := error(nil)
+		if yerr == nil {
+			terr = core.TestConfig(bin, workDir, []byte(y))
+		}
+		probeDebugf("bin=%q dir=%q proto=%q supported=%v yamlErr=%v direct=%v",
+			bin, workDir, proto, supported, yerr, terr)
+	}
 	return supported[proto]
 }
 
@@ -114,6 +208,14 @@ var (
 	capVer    string
 	capResult map[string]bool
 )
+
+// probeDebugf writes probe diagnostics to stderr when WARP_PROBE_DEBUG is set:
+// the gate's answer depends on a child process's exit code, and without the
+// binary path and the verdict in the log a failure is indistinguishable from a
+// wrong protocol name.
+func probeDebugf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "[probe] "+format+"\n", args...)
+}
 
 // resetCoreCapabilityCache drops the cached probe result so the next
 // probeCoreCapabilities re-runs against a (possibly replaced) binary — a
@@ -136,16 +238,37 @@ func probeCoreCapabilities(bin, workDir string) (version string, supported map[s
 	ver, verr := core.BinaryVersion(bin)
 	supported = map[string]bool{}
 	var firstErr error
+	names := make([]string, 0, len(protoRuns)+1)
 	for _, r := range protoRuns {
-		yaml, err := probeYAML(r.name)
+		names = append(names, r.name)
+	}
+	names = append(names, probeOpenVPNProto)
+	for _, name := range names {
+		yaml, err := probeYAML(name)
 		if err != nil {
-			supported[r.name] = false
+			supported[name] = false
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
-		supported[r.name] = core.TestConfig(bin, workDir, []byte(yaml)) == nil
+		ok, ran, terr := core.TestConfigDetail(bin, workDir, []byte(yaml))
+		if !ran {
+			// The probe could not run at all (temp file unwritable, binary
+			// unexecutable, a scanner in the way). Assume the protocol is fine:
+			// the connect itself will surface a real parse error, and blocking
+			// here would leave the user with an unusable client and a message
+			// about the wrong thing.
+			supported[name] = true
+			if firstErr == nil {
+				firstErr = terr
+			}
+			continue
+		}
+		supported[name] = ok
+		if !ok && firstErr == nil {
+			firstErr = terr
+		}
 	}
 	if verr != nil && firstErr == nil {
 		firstErr = verr

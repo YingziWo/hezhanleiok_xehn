@@ -26,6 +26,13 @@ cache.json
 psiphon-test-config.yaml
 split-direct-test.yaml
 split-proxy-test.yaml
+routing-*-test.yaml
+
+# VPN Gate runtime state: cached relay lists embed live OpenVPN profiles and
+# private keys, so they never belong in the repository.
+vpngate-*.json
+warp-report-*.txt
+health-owner
 
 # Local module cache used for the offline build
 .gomod/

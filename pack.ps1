@@ -42,23 +42,38 @@ if (-not $SkipBuild) {
     if (-not $env:GOPROXY)    { $env:GOPROXY    = 'https://goproxy.cn,direct' }
     $env:GOOS = 'windows'; $env:GOARCH = 'amd64'; $env:CGO_ENABLED = '0'
 
-    # Embed the Win32 manifest (comctl32 v6 + PerMonitorV2 DPI). walk's native
-    # widgets require themed common controls or NewMainWindow fails with
+    Push-Location $here
+
+    # Regenerate the logo artifacts from the source art: the embedded PNG the
+    # in-app brand + window/taskbar icon render from, and the multi-size .ico
+    # rsrc bakes into the exe as the program icon. The source lives one level up
+    # (the workspace root); a missing source leaves the committed artifacts.
+    $logoSrc = Join-Path $here '..\logo.png'
+    if (Test-Path $logoSrc) {
+        go run ./tools/mklogo -src $logoSrc -png assets/logo.png -ico logo.ico
+        if ($LASTEXITCODE -ne 0) { Pop-Location; throw "mklogo failed to build the logo artifacts" }
+    }
+
+    # Embed the Win32 manifest (comctl32 v6 + PerMonitorV2 DPI) and the app icon
+    # (.ico -> the exe's program/taskbar-group icon). walk's native widgets
+    # require themed common controls or NewMainWindow fails with
     # "TTM_ADDTOOL failed" at startup. rsrc is installed via
     #   go install github.com/akavel/rsrc@latest
     $rsrc = Join-Path $env:GOPATH 'bin\rsrc.exe'
+    $syso = Join-Path $here 'rsrc_windows_amd64.syso'
+    $icoArgs = @()
+    if (Test-Path (Join-Path $here 'logo.ico')) { $icoArgs = @('-ico', (Join-Path $here 'logo.ico')) }
     if (Test-Path $rsrc) {
-        & $rsrc -manifest (Join-Path $here 'app.manifest') -o (Join-Path $here 'rsrc_windows_amd64.syso') -arch amd64
-        if ($LASTEXITCODE -ne 0) { throw "rsrc failed to embed the manifest" }
-    } elseif (-not (Test-Path (Join-Path $here 'rsrc_windows_amd64.syso'))) {
-        throw "rsrc_windows_amd64.syso missing AND rsrc.exe not installed — install via: go install github.com/akavel/rsrc@latest"
+        & $rsrc -manifest (Join-Path $here 'app.manifest') @icoArgs -o $syso -arch amd64
+        if ($LASTEXITCODE -ne 0) { Pop-Location; throw "rsrc failed to embed manifest/icon" }
+    } elseif (-not (Test-Path $syso)) {
+        Pop-Location; throw "rsrc_windows_amd64.syso missing AND rsrc.exe not installed — install via: go install github.com/akavel/rsrc@latest"
     }
 
-    Push-Location $here
     go build -trimpath -ldflags "-s -w -X main.version=$Version" -o warp-client.exe .
-    if ($LASTEXITCODE -ne 0) { throw "console build failed" }
+    if ($LASTEXITCODE -ne 0) { Pop-Location; throw "console build failed" }
     go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$Version -X main.windowsGUIBuild=1" -o warp-client-gui.exe .
-    if ($LASTEXITCODE -ne 0) { throw "windowsgui build failed" }
+    if ($LASTEXITCODE -ne 0) { Pop-Location; throw "windowsgui build failed" }
     Pop-Location
     Write-Host "built warp-client.exe + warp-client-gui.exe ($Version)"
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -48,6 +49,23 @@ const (
 	// the WG handshake (whose trigger packet is dropped), so one retry absorbs
 	// a healthy-but-slow endpoint.
 	verifyRetryDelay = 2 * time.Second
+	// openvpnMaxAttempts caps base-endpoint × relay combinations in one connect.
+	// A VPN Gate relay that cannot handshake is common; the candidates arrive
+	// already ordered (residential first, then unknown, then datacenter), so six
+	// attempts give the failover chain room without turning one connect into a
+	// multi-minute walk through dead nodes.
+	openvpnMaxAttempts = 6
+	// openvpnWarmupWindow is how long one relay gets to complete its OpenVPN
+	// handshake. mihomo detaches the handshake from the inbound dial (see
+	// openvpnHandshakeTimeout), so the first client request necessarily fails;
+	// repeated requests keep the outbound dialling until the tunnel is up. The
+	// outbound itself gives up after openvpnHandshakeTimeout seconds, so waiting
+	// longer than that only delays the next candidate.
+	openvpnWarmupWindow = time.Duration(openvpnHandshakeTimeout+2) * time.Second
+	// openvpnWarmupReqTimeout bounds one warm-up request. Short on purpose: the
+	// request is a handshake trigger, not a transfer, and a dead combination
+	// must fail fast enough for the next candidate to get a turn.
+	openvpnWarmupReqTimeout = 4 * time.Second
 )
 
 // proxyHelperAllowed gates the UAC elevation fallback: only the windowsgui
@@ -72,6 +90,18 @@ func runConnectCmd(ctx context.Context, opts options) error {
 	if opts.apiPort == 0 {
 		opts.apiPort = core.DefaultAPIPort
 	}
+	// TUN needs an elevated process to create the adapter and edit routes. Fail
+	// here, before any account/scan work, so the user sees the real reason
+	// instead of a core that dies at startup with a driver error.
+	if opts.tunMode && !core.IsElevated() {
+		return fmt.Errorf("TUN 模式需要管理员权限：请以管理员身份重新运行本程序")
+	}
+	// V2 OpenVPN exit: same two-axis shape as Psiphon (base protocol carries the
+	// exit's dials), but the exit is mihomo's native openvpn outbound instead of
+	// an external SOCKS sidecar, so it has its own node pool and verification.
+	if opts.openvpnMode {
+		return runConnectOpenVPN(ctx, opts)
+	}
 	// V1 Psiphon exit: Psiphon is an independent localhost SOCKS5 egress, not a
 	// WARP transport. It has its own connect pipeline (no account, no scan, no
 	// endpoint manager) and does not touch the WARP lifecycle below.
@@ -95,6 +125,11 @@ func runConnectCmd(ctx context.Context, opts options) error {
 
 	// The user-facing protocol name every stage log below is stamped with.
 	userProto := opts.proto
+	// Chained connects render as their carrier (wwarp → wg/awg, masque-mm →
+	// masque), so the state file must be told which name to record; otherwise a
+	// MASQUE-in-MASQUE session would be saved as plain MASQUE H3 and come back
+	// as one tunnel instead of two.
+	chainUserProto = userProto
 	label := protoLabel(userProto)
 	stageMsg(fmt.Sprintf("[%s] 开始连接…", label))
 	// The user is waiting on this connect and needs one endpoint, so stop the
@@ -102,6 +137,33 @@ func runConnectCmd(ctx context.Context, opts options) error {
 	// one). A plain `scan` leaves this at 0 and measures everything.
 	if opts.earlyStop == 0 {
 		opts.earlyStop = connectEarlyStop
+	}
+
+	// MASQUE in MASQUE (H3 in H3) is the masque twin of WARP-in-WARP: the inner
+	// CONNECT-IP tunnel is dialled from inside the outer one, so Cloudflare
+	// sees the outer edge and the inner tunnel is handed a second exit. Like
+	// wwarp it is normalised into the engine's chain form — opts.proto becomes
+	// the inner run (masque), opts.through the outer endpoint — and the render
+	// emits two masque outbounds with dialer-proxy.
+	if opts.proto == protoMASQUEMASQUE {
+		opts.outerProto = protoMASQUE
+		opts.innerProto = protoMASQUE
+		if opts.through == "" {
+			stageMsg(fmt.Sprintf("[%s] 选择外层端点…", label))
+			endpoint, err := pickOuterEndpoint(ctx, opts)
+			if err != nil {
+				return err
+			}
+			opts.through = endpoint
+			opts.outerAutoPicked = true
+			stageMsg(fmt.Sprintf("[%s] 外层端点 %s", label, endpoint))
+		}
+		// One outer netstack, one worker: parallel inner dials would all share
+		// the single outer QUIC connection.
+		if opts.tunnelParallel == defaultTunnelJobs {
+			opts.tunnelParallel = nestedTunnelJobs
+		}
+		opts.proto = protoMASQUE
 	}
 
 	// WARP-in-WARP is one of the five first-class protocols but not a wire
@@ -168,7 +230,9 @@ func runConnectCmd(ctx context.Context, opts options) error {
 		if err != nil {
 			return err
 		}
-		if outerAcct == nil {
+		// A masque outer is authenticated by the same enrolled device as the
+		// inner hop, so the WireGuard outer account is not needed for it.
+		if outerAcct == nil && !outerRun.isMASQUE() {
 			return fmt.Errorf("account holds no outer device: run \"register\" again")
 		}
 		outer = &nest{
@@ -214,6 +278,22 @@ func runConnectCmd(ctx context.Context, opts options) error {
 	fmt.Fprintln(os.Stderr, errPal.ok(fmt.Sprintf("best endpoint: %s (%s) → %s %s",
 		cands[0].Endpoint, label, cands[0].Country, cands[0].Colo)))
 
+	// Two hops need two edges. If the outer hop landed on the same endpoint the
+	// inner one is about to use, the "second exit" would be one tunnel talking
+	// to itself, so move the outer to the next working endpoint.
+	if outer != nil && outer.run.isMASQUE() && strings.EqualFold(outer.endpoint, cands[0].Endpoint) {
+		for _, ce := range results {
+			if ce.Working && ce.Endpoint != "" && !strings.EqualFold(ce.Endpoint, cands[0].Endpoint) {
+				stageMsg(fmt.Sprintf("[%s] 外层换一个边缘：%s", label, ce.Endpoint))
+				outer.endpoint = ce.Endpoint
+				break
+			}
+		}
+	}
+	if outer != nil && outer.run.isMASQUE() {
+		stageMsg(fmt.Sprintf("[%s] 外层 %s → 内层 %s", label, outer.endpoint, cands[0].Endpoint))
+	}
+
 	cDir, err := coreDir()
 	if err != nil {
 		return err
@@ -239,6 +319,14 @@ func runConnectCmd(ctx context.Context, opts options) error {
 		if !protoSupportedBy(bin, cDir, p) {
 			return fmt.Errorf("当前 Core 不支持 %s 协议配置，请升级 Core（Mihomo 官方最新版）", protoLabel(p))
 		}
+	}
+	// A client that died without disconnecting (crash, Task Manager, security
+	// software) leaves its core running; that core holds the mixed and API
+	// ports, and every endpoint of this connect then fails with "port still in
+	// use" no matter how good it is. state.json remembers one PID and is not
+	// even written when the crash comes first, so sweep by binary path.
+	if n := core.KillStaleCores(bin); n > 0 {
+		stageMsg(fmt.Sprintf("[%s] 清理了 %d 个残留内核进程", label, n))
 	}
 	// A previous core can outlive its client (crash, kill -9 of the GUI): it
 	// keeps the mixed/api ports bound and the new core fails to serve. Reap
@@ -343,8 +431,8 @@ func runConnectPsiphon(ctx context.Context, opts options) error {
 	// V1 supports Psiphon only on a plain WG/AWG/MASQUE underlay, never on a
 	// chain — a WARP-in-WARP is two WARP devices and Psiphon's SOCKS has no
 	// place in it. Refuse rather than render something undefined.
-	if opts.proto == protoWWarp || opts.through != "" {
-		return fmt.Errorf("Psiphon 暂不支持与 WARP-in-WARP 组合：请用 wg / awg / masque 作为基础协议")
+	if opts.proto == protoWWarp || opts.proto == protoMASQUEMASQUE || opts.through != "" {
+		return fmt.Errorf("Psiphon 暂不支持与嵌套协议（GOOL / MASQUE in MASQUE）组合：请用 wg / awg / masque 作为基础协议")
 	}
 	// outer is a package global a nested scan sets; a long-lived GUI process must
 	// not inherit a stale chain, or the config would name an outbound that is not
@@ -441,6 +529,7 @@ func runConnectPsiphon(ctx context.Context, opts options) error {
 		BaseConfigPath: baseConfig,
 		Upstream:       fmt.Sprintf("socks5://127.0.0.1:%d", underlaySocksPort(opts.mixedPort)),
 		SocksPort:      psPort,
+		EgressRegion:   opts.psiphonRegion,
 	}
 	opts.psiphonMode = true
 	opts.psiphonSocksPort = psPort
@@ -485,6 +574,272 @@ func runConnectPsiphon(ctx context.Context, opts options) error {
 		return runConnectPsiphon(ctx, opts)
 	}
 	return fmt.Errorf("connect failed: Psiphon 隧道验证失败于 %d 个基础端点: %w", len(cands), lastErr)
+}
+
+// runConnectOpenVPN wires the V2 OpenVPN exit into the same two-axis shape as
+// Psiphon: the base protocol (WG/AWG/MASQUE) comes up first and carries the
+// exit's dials, then mihomo's native openvpn outbound — pointed at one VPN Gate
+// relay — becomes the client's final egress. No external OpenVPN binary and no
+// sidecar SOCKS port: dialer-proxy chains the outbounds inside one core.
+func runConnectOpenVPN(ctx context.Context, opts options) error {
+	if opts.mixedPort == 0 {
+		opts.mixedPort = core.DefaultMixedPort
+	}
+	if opts.apiPort == 0 {
+		opts.apiPort = core.DefaultAPIPort
+	}
+	// The relay rides the base protocol, so a nested base would need a third
+	// outbound for no benefit. Refuse it here, exactly like Psiphon does.
+	if protoChained(opts.proto) || opts.through != "" {
+		return fmt.Errorf("OpenVPN 出口暂不支持与嵌套协议（GOOL / MASQUE in MASQUE）组合：请用 wg / awg / masque 作为基础协议")
+	}
+	// VPN Gate relays are IPv4-only, and mihomo's openvpn outbound cannot carry
+	// an IPv6 tunnel. Forcing v4 here also keys the scan cache correctly and
+	// keeps verifyTunnel from demanding an IPv6 round-trip the exit cannot do.
+	opts.family = famV4
+	opts.ipv6 = false
+	outer = nil
+
+	label := protoLabel(opts.proto) + "+OpenVPN"
+	stageMsg(fmt.Sprintf("[%s] 开始连接：先起基础协议，再经 VPN Gate 节点出站…", label))
+
+	if err := ensureAccount(ctx, opts); err != nil {
+		return fmt.Errorf("account: %w", err)
+	}
+	results, run, err := runCachedScan(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("scan failed: %w", err)
+	}
+	var cands []cachedEndpoint
+	if opts.pick != "" {
+		best, ok := pickForced(results, opts.pick)
+		if !ok {
+			return fmt.Errorf("endpoint %q not in the cached scan (is -proto correct? try --scan-now)", opts.pick)
+		}
+		cands = []cachedEndpoint{best}
+	} else {
+		for _, ce := range results {
+			if ce.Working && ce.Endpoint != "" {
+				cands = append(cands, ce)
+			}
+		}
+		if len(cands) > connectMaxAttempts {
+			cands = cands[:connectMaxAttempts]
+		}
+		if len(cands) == 0 {
+			if !opts.scanNow {
+				stageMsg(fmt.Sprintf("[%s] 无可用基础端点，重新扫描…", label))
+				opts.scanNow = true
+				return runConnectOpenVPN(ctx, opts)
+			}
+			return fmt.Errorf("no working endpoint found")
+		}
+	}
+
+	cDir, err := coreDir()
+	if err != nil {
+		return err
+	}
+	bin, err := core.EnsureBinary(cDir, opts.corePath)
+	if err != nil {
+		return err
+	}
+	if !protoSupportedBy(bin, cDir, opts.proto) {
+		return fmt.Errorf("当前 Core 不支持 %s 协议配置，请升级 Core（Mihomo 官方最新版）", protoLabel(opts.proto))
+	}
+	if !protoSupportedBy(bin, cDir, probeOpenVPNProto) {
+		return fmt.Errorf("当前 Core 不支持 OpenVPN 出站配置，请升级 Core（Mihomo 官方最新版）")
+	}
+	// Reap anything a previous session left behind: the core outlives the CLI,
+	// and its pid would otherwise keep the mixed port and the state file busy.
+	if st, lerr := loadState(); lerr == nil {
+		if st.Connected && !st.TUN && len(st.ProxySnap) > 0 {
+			var snap core.ProxySnapshot
+			if json.Unmarshal(st.ProxySnap, &snap) == nil {
+				_ = core.UnsetSystemProxy(&snap)
+			}
+		}
+		if st.CorePID > 0 {
+			if kerr := core.KillByPID(st.CorePID, core.CoreInDir(cDir)); kerr == nil {
+				fmt.Fprintln(os.Stderr, errPal.warn(fmt.Sprintf("killed stale core (pid %d)", st.CorePID)))
+			}
+		}
+	}
+
+	// The relay pool: cached list first, live fetch otherwise. VPN Gate is often
+	// blocked from this network directly, so the fetch can ride the base scan's
+	// netstack (fetchVPNGateViaWARP) before any session exists.
+	nodes, err := vpnGateNodesFor(ctx, results, run, opts.scanNow)
+	if err != nil {
+		return fmt.Errorf("获取 VPN Gate 节点失败: %w", err)
+	}
+	relays := vpnGateCandidates(ctx, nodes, opts.openvpnRegion, opts.openvpnNodePin, vpnGateConnectNodes)
+	// Reconnects should reuse the relay that last carried traffic instead of
+	// walking the class/latency ladder again. A manual pin always wins, and a
+	// region that still has relays of its own is not overridden.
+	relays = preferLastGoodVPNGate(relays, opts.openvpnNodePin, opts.openvpnRegion)
+	if len(relays) == 0 {
+		if opts.openvpnRegion != "" {
+			return fmt.Errorf("VPN Gate 当前没有 %s 地区的可用节点，请换一个出口地区", opts.openvpnRegion)
+		}
+		return fmt.Errorf("VPN Gate 节点列表为空，请稍后重试")
+	}
+
+	var lastErr error
+	tried := 0
+	for _, ce := range cands {
+		for i := range relays {
+			if tried >= openvpnMaxAttempts {
+				break
+			}
+			tried++
+			node := relays[i]
+			opts.openvpnNode = &node
+			stageMsg(fmt.Sprintf("[%s] 基础端点 %s + 出口节点 %s（%s，组合 %d/%d）…",
+				label, ce.Endpoint, node.id(), node.CountryShort, tried, min(openvpnMaxAttempts, len(cands)*len(relays))))
+			state, serr := startAndVerify(ctx, opts, ce, run, bin, cDir, label, nil)
+			if serr == nil {
+				clearVPNGateFailure(node.id())
+				rememberLastGoodVPNGate(node)
+				if err := saveState(state); err != nil {
+					fmt.Fprintln(os.Stderr, errPal.warn("state not persisted: "+err.Error()))
+				}
+				stageMsg(fmt.Sprintf("[%s] 连接成功（出口 = VPN Gate %s）", label, node.CountryShort))
+				fmt.Fprintln(os.Stderr, errPal.ok(state.statusLine()))
+				if opts.tunMode {
+					fmt.Fprintln(os.Stderr, errPal.warn("TUN mode requires running with administrator rights"))
+				}
+				if !opts.noGuard {
+					ensureSessionGuard(state)
+				}
+				return nil
+			}
+			lastErr = serr
+			fmt.Fprintln(os.Stderr, errPal.warn(fmt.Sprintf("组合 %s + %s: %v", ce.Endpoint, node.id(), serr)))
+			// Deliberately NOT markEndpointDead: a relay failure says nothing
+			// about the WARP underlay, and evicting a healthy endpoint here would
+			// poison the scan cache for every later session.
+			if serr != nil && strings.Contains(serr.Error(), "base endpoint") {
+				// A dead underlay fails every relay; move on to the next base
+				// instead of burning the remaining combinations on it.
+				break
+			}
+			// The relay itself failed; the phone client's 10-minute memory keeps
+			// the next attempt (or the automatic retry scan) off this node.
+			markVPNGateFailed(node.id())
+		}
+		if tried >= openvpnMaxAttempts {
+			break
+		}
+	}
+	// Every combination failed: the snapshot may be stale on both axes. One
+	// fresh scan and a forced VPN Gate refetch, then report honestly.
+	if opts.pick == "" && !opts.scanNow {
+		stageMsg(fmt.Sprintf("[%s] 全部组合失败，重新扫描基础端点并刷新 VPN Gate 节点…", label))
+		opts.scanNow = true
+		return runConnectOpenVPN(ctx, opts)
+	}
+	return fmt.Errorf("connect failed: OpenVPN 出口在 %d 个组合上均未通过验证: %w", tried, lastErr)
+}
+
+// warmupOpenVPN keeps triggering the chained openvpn outbound until it really
+// carries a request. mihomo's inbound gives up on a dial after 5s while the
+// outbound keeps its handshake alive for handshake-timeout seconds, so the
+// first requests through a fresh session are expected to fail; verifyTunnel
+// would otherwise see a dead-looking tunnel on a perfectly healthy relay.
+func warmupOpenVPN(ctx context.Context, mixedPort int, label string) error {
+	proxyURL := mustParseURL("http://127.0.0.1:" + strconv.Itoa(mixedPort))
+	client := &http.Client{
+		Timeout: openvpnWarmupReqTimeout,
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+	// Plain HTTP on purpose: the exit only has to prove it forwards bytes, and
+	// a TLS handshake through a 1s-RTT relay adds time to every attempt.
+	target := "http://www.gstatic.com/generate_204"
+	deadline := time.Now().Add(openvpnWarmupWindow)
+	started := time.Now()
+	attempts := 0
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		attempts++
+		resp, err := client.Get(target)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusNoContent || (resp.StatusCode >= 200 && resp.StatusCode < 400) {
+				stageMsg(fmt.Sprintf("[%s] OpenVPN 中继握手完成（第 %d 次探测，%ds）", label, attempts, int(time.Since(started).Seconds())))
+				return nil
+			}
+			err = fmt.Errorf("HTTP %d", resp.StatusCode)
+		}
+		lastErr = err
+		if attempts%3 == 0 {
+			stageMsg(fmt.Sprintf("[%s] OpenVPN 中继握手中…（%ds）", label, int(time.Since(started).Seconds())))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("没有请求完成")
+	}
+	return fmt.Errorf("OpenVPN 中继握手超时（%s 内未建链）: %w", openvpnWarmupWindow, lastErr)
+}
+
+// watchOpenVPNLogs follows mihomo's log stream and reports a terminal relay
+// failure. The warm-up's HTTP requests only see an opaque 502 when the
+// outbound refuses the credentials, so the reason has to come from the core's
+// own log. The stream disappearing (old core, no API) is harmless: warm-up
+// then falls back to its time window.
+func watchOpenVPNLogs(ctx context.Context, apiPort int) (<-chan string, func()) {
+	fatal := make(chan string, 1)
+	streamCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		url := "http://127.0.0.1:" + strconv.Itoa(apiPort) + "/logs?level=info"
+		req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, url, nil)
+		if err != nil {
+			return
+		}
+		client := &http.Client{Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}
+		resp, err := client.Do(req)
+		if err != nil {
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return
+		}
+		sc := bufio.NewScanner(resp.Body)
+		sc.Buffer(make([]byte, 0, 4096), 1<<20)
+		for sc.Scan() {
+			if reason := vpnAuthFailure(sc.Text()); reason != "" {
+				select {
+				case fatal <- reason:
+				default:
+				}
+				return
+			}
+		}
+	}()
+	return fatal, cancel
+}
+
+// vpnAuthFailure recognises a definitive OpenVPN credential rejection. This
+// must stay narrow: a handshake timeout may still succeed on a retry, an
+// AUTH_FAILED never does.
+func vpnAuthFailure(line string) string {
+	low := strings.ToLower(line)
+	if strings.Contains(low, "auth_failed") || strings.Contains(low, "openvpn authentication failed") {
+		return "AUTH_FAILED"
+	}
+	return ""
 }
 
 // connectPsiphonOn runs one two-axis attempt: render the base-protocol + Psiphon
@@ -558,6 +913,7 @@ func connectPsiphonOn(ctx context.Context, opts options, ce cachedEndpoint, run 
 	state.PsiphonMode = true
 	state.PsiphonPID = ps.PID()
 	state.PsiphonSocksPort = ps.Port()
+	state.PsiphonRegion = opts.psiphonRegion
 	return state, nil
 }
 
@@ -726,6 +1082,32 @@ func startAndVerify(ctx context.Context, opts options, ce cachedEndpoint, run pr
 			return clientState{}, err
 		}
 	}
+	// The chained openvpn outbound handshakes lazily on its first dial and
+	// outlives the inbound's 5s dial timeout, so the tunnel is warmed up with
+	// repeated requests before verifyTunnel judges it. A relay that cannot link
+	// within the window is a dead candidate, not a slow one.
+	if opts.openvpnMode {
+		stageMsg(fmt.Sprintf("[%s] 预热 OpenVPN 中继（握手窗口 %s）…", label, openvpnWarmupWindow))
+		warmCtx, cancelWarm := context.WithCancel(ctx)
+		fatalCh, stopWatch := watchOpenVPNLogs(warmCtx, opts.apiPort)
+		warmDone := make(chan error, 1)
+		go func() { warmDone <- warmupOpenVPN(warmCtx, opts.mixedPort, label) }()
+		select {
+		case werr := <-warmDone:
+			stopWatch()
+			if werr != nil {
+				_ = c.Stop()
+				return clientState{}, werr
+			}
+		case reason := <-fatalCh:
+			// AUTH_FAILED is terminal for this relay: retrying the same node
+			// only spends the rest of the window before rotating anyway.
+			cancelWarm()
+			stopWatch()
+			_ = c.Stop()
+			return clientState{}, fmt.Errorf("OpenVPN 出口认证被拒绝（%s），立即换节点", reason)
+		}
+	}
 
 	// mihomo listening says nothing about the tunnel: with a dead endpoint the
 	// proxy accepts CONNECT, the dial through the dark tunnel times out, and
@@ -739,10 +1121,12 @@ func startAndVerify(ctx context.Context, opts options, ce cachedEndpoint, run pr
 		return clientState{}, fmt.Errorf("数据面验证失败: %w", perr)
 	}
 
-	// The user-facing protocol: a dialer-proxy chain is WARP-in-WARP, not the
-	// outer carrier it happens to be rendered as.
+	// The user-facing protocol: a dialer-proxy chain is WARP-in-WARP or MASQUE
+	// in MASQUE, not the carrier it happens to be rendered as.
 	protoName := run.name
-	if opts.through != "" {
+	if chainUserProto != "" {
+		protoName = chainUserProto
+	} else if opts.through != "" {
 		protoName = protoWWarp
 	}
 	state := clientState{
@@ -758,6 +1142,8 @@ func startAndVerify(ctx context.Context, opts options, ce cachedEndpoint, run pr
 		APIPort:   opts.apiPort,
 		CorePID:   c.PID(),
 		TUN:       opts.tunMode,
+		AllowLan:  opts.allowLan,
+		Family:    opts.ipFamily(),
 		NoProxy:   opts.noProxy,
 		StartedAt: time.Now().Format(time.RFC3339),
 	}
@@ -773,6 +1159,15 @@ func startAndVerify(ctx context.Context, opts options, ce cachedEndpoint, run pr
 	}
 	if probe.NodeCity != "" {
 		state.NodeCity = probe.NodeCity
+	}
+	// The exit descriptor travels in state: health repair rebuilds the session
+	// from state.json alone, and without the relay it would silently drop the
+	// OpenVPN exit and reconnect to the bare underlay.
+	if opts.openvpnMode && opts.openvpnNode != nil {
+		node := *opts.openvpnNode
+		state.OpenVPNMode = true
+		state.OpenVPNRegion = opts.openvpnRegion
+		state.OpenVPNNode = &node
 	}
 
 	// Data plane proven — now, and only now, point the host at the tunnel.
@@ -909,10 +1304,10 @@ func runDisconnectCmd(ctx context.Context, opts options) error {
 	if state.PsiphonMode && state.PsiphonPID > 0 {
 		if pexe, perr := resolvePsiphonExe(opts, cDir); perr == nil {
 			if kerr := core.KillByPID(state.PsiphonPID, pexe); kerr != nil {
-				fmt.Fprintln(os.Stderr, errPal.warn("stop psiphon: " + kerr.Error()))
+				fmt.Fprintln(os.Stderr, errPal.warn("stop psiphon: "+kerr.Error()))
 			}
 		} else {
-			fmt.Fprintln(os.Stderr, errPal.warn("psiphon exe not found: " + perr.Error()))
+			fmt.Fprintln(os.Stderr, errPal.warn("psiphon exe not found: "+perr.Error()))
 		}
 	}
 	if !state.TUN && len(state.ProxySnap) > 0 {
@@ -940,6 +1335,12 @@ func runDisconnectCmd(ctx context.Context, opts options) error {
 	state.PsiphonMode = false
 	state.PsiphonPID = 0
 	state.PsiphonSocksPort = 0
+	// The OpenVPN exit is part of the same session: clearing it here is what
+	// keeps a later health repair or reconnect from resurrecting a relay the
+	// user already disconnected.
+	state.OpenVPNMode = false
+	state.OpenVPNRegion = ""
+	state.OpenVPNNode = nil
 	_ = saveState(state)
 	fmt.Fprintln(os.Stderr, errPal.ok("disconnected"))
 	return nil
@@ -980,6 +1381,7 @@ func runStatusCmd(ctx context.Context, opts options) error {
 				{"session", state.sessionLabel()},
 				{"protocol", state.Proto},
 				{"endpoint", state.Endpoint},
+				{"relay", relayRow(state)},
 				{"mixed port", strconv.Itoa(state.MixedPort)},
 			}
 			for _, r := range rows {
@@ -997,6 +1399,7 @@ func runStatusCmd(ctx context.Context, opts options) error {
 			{"session", state.sessionLabel()},
 			{"protocol", state.Proto},
 			{"endpoint", state.Endpoint},
+			{"relay", relayRow(state)},
 			{"exit IP", state.ExitIP},
 			{"country", state.Country},
 			{"colo", state.Colo},
