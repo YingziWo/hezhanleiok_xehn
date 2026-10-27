@@ -73,7 +73,7 @@ The GUI never embeds mihomo; it manages `core\mihomo.exe` as a plain file:
 dependency). The layout is a 1080x700 grid scaled by the display DPI, so it
 stays sharp from 100% to 250% Windows scaling.
 
-A left rail switches between five pages, and the header carries the two
+A left rail switches between four pages, and the header carries the two
 appearance switches (theme, language) so neither needs a trip to settings:
 
 | page | contents |
@@ -83,14 +83,41 @@ appearance switches (theme, language) so neither needs a trip to settings:
 | **About** | versions, data/core paths, licences, client and core updates |
 | **Logs** | run log (level-tagged console), connection history (the connect pipeline's own steps), diagnostics (copyable) |
 
-![home](docs/screenshots/01-home-light.png)
-![settings](docs/screenshots/04-settings-general.png)
-![dark + English](docs/screenshots/10-nodes-dark-en.png)
-
 Theme: **light (default)**, dark, or follow the system — switched live, title
 bar included. Language: **中文 (default)** or English; every string goes through
 one table, so a missing translation falls back to Chinese instead of showing a
 key.
+
+#### Screenshots
+
+**Home** — the connect circle with the session clock, the live exit (flag,
+colo, latency, throughput) and the protocol picker:
+
+![Home](docs/screenshots/01-home.png)
+
+**Settings** — one scrollable page: capture (system proxy or VPN/TUN, local
+port, LAN access, API port, address family, MTU) and routing (preset, default
+node, direct/proxy domain lists):
+
+![Settings — capture and routing](docs/screenshots/02-settings-capture.png)
+
+…then startup/behaviour (autostart, auto-connect, rescan, auto-repair,
+timeout) and DNS & exit:
+
+![Settings — behaviour and DNS](docs/screenshots/03-settings-behaviour.png)
+
+**Logs** — runtime log, connection history and copyable diagnostics:
+
+![Logs](docs/screenshots/04-logs.png)
+
+**About** — versions, paths, licences, client and core updates:
+
+![About](docs/screenshots/05-about.png)
+
+The same window in English (the language pill lives in the Home header, so it
+never needs a trip to settings):
+
+![English UI](docs/screenshots/06-logs-en.png)
 
 Preferences live in `settings.json` next to the exe (portable layout) and are
 applied to the engine on connect: proxy mode and the domain lists become mihomo
