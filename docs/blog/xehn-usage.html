@@ -1,0 +1,145 @@
+<!--
+  XEHN VPN Client · Blogger 正文（HTML 视图粘贴用）
+  发布前只需替换两个占位符：
+    {{DOWNLOAD_URL_1}}  → 下载地址一
+    {{DOWNLOAD_URL_2}}  → 下载地址二
+  文中图片托管在 GitHub（jsDelivr CDN）。若图床打不开，把 img 的 src 换成
+  https://raw.githubusercontent.com/hezhanleiok/xehn/main/docs/blog/xxx.png 即可。
+  全文无 script / 无外链样式表，只用内联样式，兼容 Blogger 编辑器。
+-->
+
+<div style="max-width:820px;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;font-size:16px;line-height:1.85;color:#232833;word-break:break-word;">
+
+  <p style="margin:0 0 18px;">XEHN VPN Client 是一个 Windows 上的 <strong>Cloudflare WARP 一键客户端</strong>：启动后点一下中间的圆钮，它会自动扫描最快的 WARP 端点、写好配置、拉起内核并接管系统代理，不用自己拼配置文件，也不用装任何运行库。</p>
+
+  <div style="background:#f5f8ff;border:1px solid #e1ebfb;border-radius:14px;padding:18px 22px;margin:0 0 26px;">
+    <p style="margin:0 0 10px;font-weight:600;color:#1b2233;">它做了什么</p>
+    <ul style="margin:0;padding-left:22px;color:#414a5e;">
+      <li style="margin:4px 0;">自动注册 / 复用本机 WARP 设备账号，自动扫描最优端点</li>
+      <li style="margin:4px 0;">支持 WireGuard、AmneziaWG（抗封锁）、MASQUE（H2 / H3）以及 WARP-in-WARP 链式</li>
+      <li style="margin:4px 0;">系统代理模式开箱即用；需要整机流量可切到 TUN 全局模式</li>
+      <li style="margin:4px 0;">可选 Psiphon、OpenVPN（VPN Gate）二次出口，并按实测速度自动换节点</li>
+      <li style="margin:4px 0;">原生窗口，浅色 / 深色主题，中文 / English 一键切换</li>
+    </ul>
+  </div>
+
+  <p style="margin:0 0 8px;color:#5b6478;font-size:14px;">系统要求：Windows 10 / 11（64 位）。便携版免安装，解压即用，配置文件就放在程序旁边。</p>
+
+  <h2 style="font-size:22px;line-height:1.5;margin:34px 0 14px;padding-left:12px;border-left:4px solid #2f6fed;color:#161b26;">一、下载与解压</h2>
+  <p style="margin:0 0 14px;">在文末下载压缩包，解压到任意<strong>可写</strong>目录（例如 <code style="background:#f1f4f9;padding:2px 6px;border-radius:5px;font-size:14px;">D:\XEHN</code>，不要放在 <code style="background:#f1f4f9;padding:2px 6px;border-radius:5px;font-size:14px;">C:\Program Files</code> 这类需要管理员权限的目录）。</p>
+  <p style="margin:0 0 14px;">解压后只有一个程序文件：</p>
+  <pre style="background:#1f2430;color:#e6ecf7;border-radius:12px;padding:16px 18px;font-size:13.5px;line-height:1.7;overflow-x:auto;margin:0 0 14px;font-family:Consolas,Monaco,monospace;">XEHN\
+├── warp-client.exe        ← 双击它
+├── core\
+│   ├── mihomo.exe         ← 内核，可单独替换升级
+│   ├── psiphon.exe        ← 可选：Psiphon 出口
+│   ├── client.config      ← 可选：Psiphon 官方配置
+│   └── server_list.dat    ← 可选：Psiphon 初始服务器列表
+├── licenses\GPL-3.0.txt
+├── THIRD_PARTY_NOTICES.md
+└── README.txt</pre>
+
+  <h2 style="font-size:22px;line-height:1.5;margin:34px 0 14px;padding-left:12px;border-left:4px solid #2f6fed;color:#161b26;">二、启动：先看一个提示</h2>
+  <p style="margin:0 0 14px;">双击 <code style="background:#f1f4f9;padding:2px 6px;border-radius:5px;font-size:14px;">warp-client.exe</code>，第一次会弹出一个「使用须知」窗口，内容是：</p>
+  <blockquote style="margin:0 0 14px;padding:14px 18px;background:#fff8e8;border-left:4px solid #f0b429;border-radius:0 10px 10px 0;color:#6b4d09;font-size:15px;">本软件开源免费，仅供学习交流使用，禁止售卖！</blockquote>
+  <p style="margin:0 0 14px;">点「我已知晓」即可。如果你是从付费渠道拿到这个软件的，说明买到了转卖版——直接去文末的 GitHub 项目地址免费下载。</p>
+  <p style="margin:0 0 14px;color:#5b6478;font-size:14px;">这个提示每次启动都会出现，同一句话也常驻在「关于」页底部。</p>
+
+  <h2 style="font-size:22px;line-height:1.5;margin:34px 0 14px;padding-left:12px;border-left:4px solid #2f6fed;color:#161b26;">三、点一下就连上</h2>
+  <p style="margin:0 0 6px;">主界面长这样：左边是导航，中间是连接按钮，右边是当前的出口信息。</p>
+
+  <img src="https://cdn.jsdelivr.net/gh/hezhanleiok/xehn@main/docs/blog/01-home.png" alt="XEHN VPN Client 首页" width="100%" style="width:100%;height:auto;display:block;border:1px solid #e6ecf5;border-radius:12px;margin:18px 0 8px;">
+  <p style="text-align:center;color:#8b93a5;font-size:13px;margin:0 0 22px;">图 1 · 首页：中间的圆钮就是连接开关</p>
+
+  <p style="margin:0 0 12px;">操作顺序：</p>
+  <ol style="margin:0 0 16px;padding-left:24px;color:#2b3242;">
+    <li style="margin:6px 0;">点中间的圆形<strong>「连接」</strong>按钮。</li>
+    <li style="margin:6px 0;">首次使用会自动注册本机 WARP 设备账号，然后扫描端点（约 1–2 分钟，之后有缓存会快很多）。</li>
+    <li style="margin:6px 0;">连上后，圆钮下方会显示<strong>出口 IP</strong>、<strong>国家/地区</strong>、<strong>延迟</strong>，下面两张卡片显示实时<strong>上传 / 下载</strong>速率。</li>
+    <li style="margin:6px 0;">再点一次即可断开，系统代理会自动还原。</li>
+  </ol>
+  <p style="margin:0 0 14px;">圆钮下方那个下拉框是<strong>协议选择</strong>：默认 <code style="background:#f1f4f9;padding:2px 6px;border-radius:5px;font-size:14px;">AWG</code>（AmneziaWG，抗封锁能力更强）。连不上时可以换成 <code style="background:#f1f4f9;padding:2px 6px;border-radius:5px;font-size:14px;">WG</code> 或 <code style="background:#f1f4f9;padding:2px 6px;border-radius:5px;font-size:14px;">MASQUE</code> 再试；换协议时如果已经连着，它会自动热切换，不用手动断开。</p>
+  <p style="margin:0 0 14px;">右上角两个小药丸分别是<strong>主题</strong>（浅色 / 深色 / 跟随系统）和<strong>语言</strong>（中文 / English），随时点、立即生效。</p>
+
+  <h2 style="font-size:22px;line-height:1.5;margin:34px 0 14px;padding-left:12px;border-left:4px solid #2f6fed;color:#161b26;">四、按需调整设置（可选）</h2>
+  <p style="margin:0 0 6px;">默认配置已经能直接用，多数人不需要动。想改的话点左侧「设置」，一页往下滚就是全部选项：</p>
+
+  <img src="https://cdn.jsdelivr.net/gh/hezhanleiok/xehn@main/docs/blog/02-settings.png" alt="XEHN VPN Client 设置：连接与接管、分流规则" width="100%" style="width:100%;height:auto;display:block;border:1px solid #e6ecf5;border-radius:12px;margin:18px 0 8px;">
+  <p style="text-align:center;color:#8b93a5;font-size:13px;margin:0 0 22px;">图 2 · 设置上半部分：接管方式与分流规则</p>
+
+  <div style="border:1px solid #e6ecf5;border-radius:12px;padding:4px 20px 14px;margin:0 0 22px;">
+    <p style="margin:16px 0 6px;font-weight:600;">接管方式</p>
+    <p style="margin:0;color:#414a5e;"><strong>系统代理</strong>（默认，推荐）：只影响走系统代理的程序，不需要管理员权限。<strong>VPN / TUN</strong>：整机流量都进隧道，需要右键「以管理员身份运行」。</p>
+    <p style="margin:16px 0 6px;font-weight:600;">本地代理端口 / API 端口</p>
+    <p style="margin:0;color:#414a5e;">默认 <code style="background:#f1f4f9;padding:2px 6px;border-radius:5px;font-size:14px;">7890</code>（HTTP + SOCKS 混合端口）和 <code style="background:#f1f4f9;padding:2px 6px;border-radius:5px;font-size:14px;">9090</code>。端口被占用时改这里，改完点「重新连接以应用」。</p>
+    <p style="margin:16px 0 6px;font-weight:600;">分流规则</p>
+    <p style="margin:0;color:#414a5e;">预设里可选「自定义 / 绕过大陆 / 黑名单 / 全局 / 直连」。自定义模式下，<strong>直连域名</strong>走本地网络、<strong>代理域名</strong>走隧道，其余按预设处理。</p>
+  </div>
+
+  <img src="https://cdn.jsdelivr.net/gh/hezhanleiok/xehn@main/docs/blog/03-settings-dns.png" alt="XEHN VPN Client 设置：启动与行为、DNS 与出口" width="100%" style="width:100%;height:auto;display:block;border:1px solid #e6ecf5;border-radius:12px;margin:18px 0 8px;">
+  <p style="text-align:center;color:#8b93a5;font-size:13px;margin:0 0 22px;">图 3 · 设置下半部分：启动与行为、DNS 与出口</p>
+
+  <div style="border:1px solid #e6ecf5;border-radius:12px;padding:4px 20px 14px;margin:0 0 22px;">
+    <p style="margin:16px 0 6px;font-weight:600;">启动与行为</p>
+    <p style="margin:0;color:#414a5e;">开机自启、启动后自动连接、连接前重新扫描、自动修复（断线后后台自愈）、连接超时。日常建议只打开「自动修复」。</p>
+    <p style="margin:16px 0 6px;font-weight:600;">DNS 与出口</p>
+    <p style="margin:0;color:#414a5e;">可以指定自定义 DNS（如 <code style="background:#f1f4f9;padding:2px 6px;border-radius:5px;font-size:14px;">223.5.5.5</code>）、开启防 DNS 泄漏。出口除了 WARP 本身，还能挂 Psiphon 或 OpenVPN（VPN Gate 公共节点），后者会按实测速度挑节点、太慢自动换。</p>
+  </div>
+
+  <h2 style="font-size:22px;line-height:1.5;margin:34px 0 14px;padding-left:12px;border-left:4px solid #2f6fed;color:#161b26;">五、出问题看日志</h2>
+  <p style="margin:0 0 6px;">左侧「日志」页有三个标签：<strong>运行日志</strong>（客户端和内核的实时输出）、<strong>连接记录</strong>（每次连接经过的步骤）、<strong>调试信息</strong>。连不上时，先看这里有没有红色/黄色提示。</p>
+
+  <img src="https://cdn.jsdelivr.net/gh/hezhanleiok/xehn@main/docs/blog/04-logs.png" alt="XEHN VPN Client 日志页" width="100%" style="width:100%;height:auto;display:block;border:1px solid #e6ecf5;border-radius:12px;margin:18px 0 8px;">
+  <p style="text-align:center;color:#8b93a5;font-size:13px;margin:0 0 22px;">图 4 · 日志页：右上角可一键清空或复制全文</p>
+
+  <p style="margin:0 0 14px;">遇到问题需要求助时，点「复制」把日志全文复制出来，比截图好排查。</p>
+
+  <h2 style="font-size:22px;line-height:1.5;margin:34px 0 14px;padding-left:12px;border-left:4px solid #2f6fed;color:#161b26;">六、常见问题</h2>
+
+  <table style="width:100%;border-collapse:collapse;font-size:15px;margin:0 0 22px;">
+    <tbody>
+      <tr>
+        <td style="width:38%;padding:12px 14px;border:1px solid #e6ecf5;background:#f7f9fd;font-weight:600;vertical-align:top;">一直转圈，最后提示失败</td>
+        <td style="padding:12px 14px;border:1px solid #e6ecf5;vertical-align:top;">换一个协议（AWG → WG → MASQUE）再试；或在协议下拉框旁重新扫描端点。日志里能看到具体卡在哪一步。</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 14px;border:1px solid #e6ecf5;background:#f7f9fd;font-weight:600;vertical-align:top;">日志里出现黄色 WARN</td>
+        <td style="padding:12px 14px;border:1px solid #e6ecf5;vertical-align:top;">多数是正常现象：连 OpenVPN 出口时，中继握手要几秒到二十秒，期间的探测会超时并被内核记为 WARN。后面出现「握手完成」「数据面验证通过」就是成功了。</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 14px;border:1px solid #e6ecf5;background:#f7f9fd;font-weight:600;vertical-align:top;">TUN 模式起不来</td>
+        <td style="padding:12px 14px;border:1px solid #e6ecf5;vertical-align:top;">TUN 需要管理员权限，右键 exe「以管理员身份运行」；或者切回系统代理模式。</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 14px;border:1px solid #e6ecf5;background:#f7f9fd;font-weight:600;vertical-align:top;">杀毒软件报警</td>
+        <td style="padding:12px 14px;border:1px solid #e6ecf5;vertical-align:top;">程序会修改系统代理、创建虚拟网卡，属于正常行为，加入信任即可。不放心的可以直接对照 GitHub 上的源码自行编译。</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 14px;border:1px solid #e6ecf5;background:#f7f9fd;font-weight:600;vertical-align:top;">换电脑要不要重新配置</td>
+        <td style="padding:12px 14px;border:1px solid #e6ecf5;vertical-align:top;">不用。压缩包里不含任何账号，每台新设备首次连接会自动注册一个独立的 WARP 设备账号。</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 14px;border:1px solid #e6ecf5;background:#f7f9fd;font-weight:600;vertical-align:top;">关于页的控制码是什么</td>
+        <td style="padding:12px 14px;border:1px solid #e6ecf5;vertical-align:top;">每台设备一个标识，用于识别被转卖或滥用的副本。正常使用不需要管它，也不会上传任何个人数据。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 style="font-size:22px;line-height:1.5;margin:34px 0 14px;padding-left:12px;border-left:4px solid #2f6fed;color:#161b26;">七、下载</h2>
+
+  <div style="background:#eef4ff;border:1px solid #cfe0ff;border-radius:16px;padding:26px 22px;text-align:center;margin:0 0 20px;">
+    <p style="margin:0 0 6px;font-size:18px;font-weight:600;color:#161b26;">XEHN VPN Client · 便携版</p>
+    <p style="margin:0 0 20px;color:#5b6478;font-size:14px;">Windows 10 / 11 64 位 · 解压即用 · 不含任何账号数据</p>
+    <p style="margin:0 0 6px;">
+      <a href="{{DOWNLOAD_URL_1}}" target="_blank" rel="noopener" style="display:inline-block;padding:13px 30px;margin:6px;background:#2f6fed;color:#ffffff;border-radius:10px;text-decoration:none;font-weight:600;font-size:16px;">下载地址一</a>
+      <a href="{{DOWNLOAD_URL_2}}" target="_blank" rel="noopener" style="display:inline-block;padding:13px 30px;margin:6px;background:#ffffff;color:#2f6fed;border:1px solid #b9d2ff;border-radius:10px;text-decoration:none;font-weight:600;font-size:16px;">下载地址二</a>
+    </p>
+    <p style="margin:16px 0 0;font-size:14px;color:#5b6478;">GitHub 项目地址：<a href="https://github.com/hezhanleiok/xehn" target="_blank" rel="noopener" style="color:#2f6fed;text-decoration:none;font-weight:600;">github.com/hezhanleiok/xehn</a></p>
+  </div>
+
+  <div style="background:#fff8e8;border:1px solid #f6e2b8;border-radius:14px;padding:18px 22px;margin:0 0 10px;">
+    <p style="margin:0 0 8px;font-weight:600;color:#6b4d09;">声明</p>
+    <p style="margin:0;color:#6b4d09;font-size:15px;">本软件<strong>开源免费，仅供学习交流使用，禁止售卖！</strong>程序只在你自己的设备上配置一条加密隧道，不提供、不代理任何服务器资源。请遵守当地法律法规，自行承担使用风险。</p>
+  </div>
+
+</div>
