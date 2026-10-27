@@ -14,8 +14,26 @@ import (
 	"time"
 )
 
+// This client's own home. Everything the About page shows — the project page,
+// the releases, the issue tracker, the notices and the licence — points here,
+// so no card ever sends the user hunting through a local folder.
 const (
-	ghLatestURL = "https://api.github.com/repos/vernette/warpscout/releases/latest"
+	repoOwner = "hezhanleiok"
+	repoName  = "xehn"
+	repoURL   = "https://github.com/" + repoOwner + "/" + repoName
+
+	repoReleasesURL = repoURL + "/releases"
+	repoIssuesURL   = repoURL + "/issues"
+	repoNoticesURL  = repoURL + "/blob/main/THIRD_PARTY_NOTICES.md"
+	repoLicenseURL  = repoURL + "/blob/main/third_party/GPL-3.0.txt"
+	// coreRepoURL is where the mihomo core comes from: the client downloads
+	// its releases rather than building it, so this is the "core source" the
+	// About card names instead of a path on this disk.
+	coreRepoURL = "https://github.com/MetaCubeX/mihomo"
+)
+
+const (
+	ghLatestURL = "https://api.github.com/repos/" + repoOwner + "/" + repoName + "/releases/latest"
 
 	updateCheckTimeout = 2 * time.Second
 	updateCacheTTL     = 6 * time.Hour

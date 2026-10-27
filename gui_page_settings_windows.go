@@ -3,6 +3,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/lxn/walk"
 
 	"github.com/xhwarp/warp-client/internal/core"
@@ -380,71 +382,148 @@ func (u *natUI) paintSetExit(c *walk.Canvas, x, y, w float64) {
 // About + updates
 // ---------------------------------------------------------------------------
 
+// aboutLink is one clickable row of the link card: the label the user reads and
+// the address the row opens. Every one of them is a GitHub URL — the About page
+// never points at a folder on this disk, because a path is useless to anyone
+// reading the page on another machine (or on a screenshot).
+type aboutLink struct {
+	id, label, url string
+}
+
+func aboutLinks() []aboutLink {
+	return []aboutLink{
+		{"about:project", tr("项目主页"), repoURL},
+		{"about:releases", tr("发布页"), repoReleasesURL},
+		{"about:issues", tr("问题反馈"), repoIssuesURL},
+		{"about:notices", tr("第三方声明"), repoNoticesURL},
+		{"about:license", tr("许可全文"), repoLicenseURL},
+	}
+}
+
+// shortURL is the address without the scheme: the whole string then fits the
+// card's value column, and "github.com/…" still reads as a link.
+func shortURL(u string) string { return strings.TrimPrefix(u, "https://") }
+
+// The About page is a fixed 3-row grid plus a two-line footer. The heights are
+// named (and asserted by aboutLayout) because the page does not scroll: a card
+// that grows past the body box is clipped, and clipping a licence line is the
+// one thing this page must not do.
+const (
+	aboutRow1H = 186.0 // 本程序 / 开源与许可
+	aboutRow2H = 182.0 // 客户端更新 / 远程控制
+	aboutRow3H = 152.0 // 项目链接
+	aboutGap   = 14.0
+	aboutFootG = 8.0 // gap between the last card and the footer
+)
+
+// aboutLayout returns the top of each row and of the footer, in design units,
+// for the body's own top edge.
+func aboutLayout(bodyY float64) (row1, row2, row3, footer float64) {
+	row1 = bodyY
+	row2 = row1 + aboutRow1H + aboutGap
+	row3 = row2 + aboutRow2H + aboutGap
+	footer = row3 + aboutRow3H + aboutFootG
+	return
+}
+
 func (u *natUI) paintAbout(c *walk.Canvas, x, y, w float64) {
-	half := (w - 14) / 2
-	cy := u.card(c, x, y, half, 240, tr("本程序"))
-	dir, _ := appDir()
-	cDir, _ := coreDir()
-	rows := [][2]string{
+	half := (w - aboutGap) / 2
+	rx := x + half + aboutGap
+	// Two buttons per card row, 16px of padding on both sides and 10 between:
+	// the right button has to clear the card's rim, not sit on it.
+	bw := (half - 16 - 16 - 10) / 2
+	row1, row2, row3, footer := aboutLayout(y)
+
+	// Row 1 — what this build is, and what it is built from.
+	cy := u.card(c, x, row1, half, aboutRow1H, tr("本程序"))
+	for _, kv := range [][2]string{
 		{tr("名称"), appName},
 		{tr("版本"), shortVersion()},
 		{tr("构建"), guiBuildKind()},
-		{tr("数据目录"), orEmpty(dir, tr("未知"))},
 		{tr("核心版本"), orEmpty(u.m.coreVersion, tr("未探测"))},
-		{tr("核心大小"), coreSizeText(u.m.coreSize)},
+	} {
+		u.kv(c, x, cy, half, kv[0], kv[1])
+		cy += 24
 	}
-	ry := cy
-	for _, kv := range rows {
-		u.kv(c, x, ry, half, kv[0], kv[1])
-		ry += 24
-	}
-	bw := (half - 16 - 10) / 2
-	u.button(c, x+16, y+192, bw, 34, "about:opendata", tr("打开数据目录"), false, true)
-	u.button(c, x+16+bw+10, y+192, bw, 34, "about:copydiag", tr("复制诊断信息"), false, true)
+	u.button(c, x+16, row1+146, bw, 34, "about:copydiag", tr("复制诊断信息"), false, true)
+	u.button(c, x+16+bw+10, row1+146, bw, 34, "about:project", tr("打开项目主页"), false, true)
 
-	rx := x + half + 14
-	cy = u.card(c, rx, y, half, 240, tr("开源与许可"))
-	rows = [][2]string{
-		{tr("内核"), "mihomo (Clash Meta) " + orEmpty(u.m.coreVersion, "")},
+	cy = u.card(c, rx, row1, half, aboutRow1H, tr("开源与许可"))
+	for _, kv := range [][2]string{
+		{tr("内核"), "mihomo " + orEmpty(u.m.coreVersion, tr("未探测")) + " · " + coreSizeText(u.m.coreSize)},
 		{tr("内核许可"), "GPL-3.0"},
 		{tr("协议引擎"), "WireGuard / AmneziaWG / MASQUE"},
-		{tr("声明文件"), "THIRD_PARTY_NOTICES.md"},
-		{tr("许可全文"), "third_party/GPL-3.0.txt"},
-		{tr("更新源"), projectURL},
+		{tr("内核来源"), shortURL(coreRepoURL + "/releases")},
+	} {
+		u.kv(c, rx, cy, half, kv[0], kv[1])
+		cy += 24
 	}
-	ry = cy
-	for _, kv := range rows {
-		u.kv(c, rx, ry, half, kv[0], kv[1])
-		ry += 24
-	}
-	u.button(c, rx+16, y+192, bw, 34, "about:notices", tr("打开第三方声明"), false, true)
-	u.button(c, rx+16+bw+10, y+192, bw, 34, "about:project", tr("打开发布页"), false, true)
+	u.button(c, rx+16, row1+146, bw, 34, "upd:core", tr("检查/下载内核"), true, !u.m.coreBusy)
+	u.button(c, rx+16+bw+10, row1+146, bw, 34, "upd:refresh", tr("重新探测内核"), false, !u.m.coreBusy)
 
-	// Update row.
-	y2 := y + 254
-	cy = u.card(c, x, y2, half, 170, tr("客户端更新"))
+	// Row 2 — updates, and the remote-control identity this install carries.
+	y2 := row2
+	cy = u.card(c, x, y2, half, aboutRow2H, tr("客户端更新"))
 	u.kv(c, x, cy, half, tr("当前版本"), shortVersion())
 	u.kv(c, x, cy+24, half, tr("最新版本"), orEmpty(u.m.updLatest, tr("尚未检查")))
 	u.kv(c, x, cy+48, half, tr("状态"), orEmpty(u.m.updNote, tr("点击下方按钮检查更新")))
-	u.button(c, x+16, y2+126, bw, 34, "upd:check", tr("检查更新"), true, !u.m.updBusy)
-	u.button(c, x+16+bw+10, y2+126, bw, 34, "about:project", tr("打开发布页"), false, true)
+	u.button(c, x+16, y2+140, bw, 34, "upd:check", tr("检查更新"), true, !u.m.updBusy)
+	u.button(c, x+16+bw+10, y2+140, bw, 34, "about:releases", tr("打开发布页"), false, true)
 
-	cy = u.card(c, rx, y2, half, 170, tr("内核 (mihomo)"))
-	u.kv(c, rx, cy, half, tr("状态"), coreSizeText(u.m.coreSize))
-	u.kv(c, rx, cy+24, half, tr("版本"), orEmpty(u.m.coreVersion, tr("未探测")))
-	u.kv(c, rx, cy+48, half, tr("路径"), core.CoreInDir(cDir))
-	u.button(c, rx+16, y2+126, bw, 34, "upd:core", tr("检查/下载内核"), true, !u.m.coreBusy)
-	u.button(c, rx+16+bw+10, y2+126, bw, 34, "upd:refresh", tr("重新探测内核"), false, !u.m.coreBusy)
+	cy = u.card(c, rx, y2, half, aboutRow2H, tr("远程控制"))
+	u.kv(c, rx, cy, half, tr("控制码"), orEmpty(u.m.set.ControlCode, tr("未知")))
+	u.txt(c, rx+16, cy+24, 84, 22, tr("状态"), u.f.f9, th.dim)
+	stText, stColor := u.controlStatus()
+	u.txt(c, rx+16+84, cy+24, half-32-84, 22, stText, u.f.f9, stColor)
+	u.kv(c, rx, cy+48, half, tr("最近检查"), controlCheckedText(u.m.control))
+	u.button(c, rx+16, y2+140, bw, 34, "about:copycode", tr("复制控制码"), false, true)
+	u.button(c, rx+16+bw+10, y2+140, bw, 34, "about:checkcontrol", tr("立即检查"), true, !u.m.controlBusy)
 
-	// Disclaimer: one line of fact, one line of limits.
-	y3 := y2 + 184
-	u.cardPlain(c, x, y3, w, 700-14-y3)
-	u.txt(c, x+16, y3+12, w-32, 20, tr("免责声明"), u.f.f10b, th.text)
-	for i, line := range []string{
-		tr("本程序只负责在你自己的设备上配置一条加密隧道，不提供、不代理任何服务器资源。"),
-		tr("隧道出口由 Cloudflare WARP 提供；内核与协议引擎均为独立的 GPL-3.0 作品，以单独的可执行文件分发。"),
-		tr("程序按「现状」提供，不对可用性、速度或适用性作任何承诺。"),
-	} {
-		u.txt(c, x+16, y3+36+float64(i)*20, w-32, 18, line, u.f.f8, th.dim)
+	// Row 3 — every address the page offers, as one clickable list.
+	y3 := row3
+	cy = u.card(c, x, y3, w, aboutRow3H, tr("项目链接"))
+	for i, ln := range aboutLinks() {
+		ly := cy + float64(i)*22
+		r := u.r(x+8, ly-2, w-16, 22)
+		if u.m.hover == ln.id {
+			u.fillRound(c, mix(th.card, th.accentSoft, 0.5), r, 8)
+		}
+		u.txt(c, x+16, ly, 110, 20, ln.label, u.f.f10, th.text)
+		u.txt(c, x+130, ly, w-146, 20, shortURL(ln.url), u.f.f8, th.accent)
+		u.addSpot(ln.id, r, true)
 	}
+
+	// Footer: the same sentence the startup notice opens with, kept on the page
+	// so it is still there after the notice has been dismissed.
+	yf := footer
+	u.txt(c, x+2, yf, w-4, 18, tr("本软件开源免费，仅供学习交流使用，禁止售卖！"), u.f.f10, th.text)
+	u.txt(c, x+2, yf+20, w-4, 18,
+		tr("本程序只在你自己的设备上配置一条加密隧道，不提供、不代理任何服务器资源；程序按「现状」提供，不对可用性、速度或适用性作任何承诺。"),
+		u.f.f8, th.dim)
+}
+
+// controlStatus is the About card's verdict line: stopped outranks everything,
+// then "checked and fine", then "never reached the list".
+func (u *natUI) controlStatus() (string, walk.Color) {
+	switch {
+	case u.m.control.Stopped:
+		return tr("已停用"), th.warn
+	case u.m.control.Reached:
+		return tr("正常"), th.ok
+	default:
+		return tr("未检查"), th.dim
+	}
+}
+
+// controlCheckedText renders the last check as a compact timestamp, and says so
+// when that check never got an answer.
+func controlCheckedText(st controlState) string {
+	if st.CheckedAt.IsZero() {
+		return tr("尚未检查")
+	}
+	s := st.CheckedAt.Format("01-02 15:04")
+	if !st.Reached {
+		s += " · " + tr("未连上")
+	}
+	return s
 }

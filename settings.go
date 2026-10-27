@@ -136,6 +136,13 @@ type clientSettings struct {
 	AutoConnect bool `json:"auto_connect"`
 	AutoStart   bool `json:"auto_start"`
 
+	// ControlCode is this install's remote-control identity: derived from the
+	// machine on Windows, shown on the About page, and checked against the
+	// published stop list so a build can be switched off without shipping a
+	// new release. It is persisted only so the About page can show it before
+	// the first check and so a non-Windows build has something stable.
+	ControlCode string `json:"control_code"`
+
 	// Starred holds endpoints marked as favourites; the node list shows them
 	// first and they survive a rescan.
 	Starred []string `json:"starred"`
@@ -336,6 +343,11 @@ func (s *clientSettings) normalize() {
 		s.OpenVPNRegion = ""
 	}
 	s.OpenVPNNode = strings.TrimSpace(s.OpenVPNNode)
+	// The control code is compared against a hand-written list, so it is kept
+	// in one spelling: upper case, four-character groups, nothing else.
+	if s.ControlCode != "" {
+		s.ControlCode = normalizeControlCode(s.ControlCode)
+	}
 	out := s.Starred[:0]
 	for _, e := range s.Starred {
 		if e = strings.TrimSpace(e); e != "" {

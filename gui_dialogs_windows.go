@@ -3,10 +3,8 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -235,6 +233,104 @@ func (u *natUI) confirm(title, question string) bool {
 	return dlg.Run() == walk.DlgCmdOK
 }
 
+// infoDialog is the app's one-button notice: a headline, a few short lines and
+// a single acknowledgement. Lines are kept short on purpose — walk labels do
+// not wrap, so a long paragraph would be clipped rather than reflowed.
+func (u *natUI) infoDialog(title, headline string, lines []string) {
+	dlg, err := walk.NewDialogWithFixedSize(u.mw)
+	if err != nil {
+		u.addLog(tr("打开对话框失败")+": "+err.Error(), true)
+		return
+	}
+	bg, _ := walk.NewSolidColorBrush(dialogSurface())
+	if bg != nil {
+		dlg.SetBackground(bg)
+	}
+	icon := styleDialog(dlg)
+	defer func() {
+		dlg.Dispose()
+		if icon != nil {
+			icon.Dispose()
+		}
+		if bg != nil {
+			bg.Dispose()
+		}
+	}()
+	dlg.SetTitle(title)
+
+	vbox := walk.NewVBoxLayout()
+	_ = vbox.SetMargins(walk.Margins{HNear: 24, VNear: 18, HFar: 24, VFar: 16})
+	_ = vbox.SetSpacing(8)
+	if err := dlg.SetLayout(vbox); err != nil {
+		return
+	}
+
+	if headline != "" {
+		if lbl, lerr := walk.NewLabel(dlg); lerr == nil {
+			_ = lbl.SetText(headline)
+			_ = lbl.SetMinMaxSize(walk.Size{Width: 460}, walk.Size{Width: 460})
+		}
+	}
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if lbl, lerr := walk.NewLabel(dlg); lerr == nil {
+			_ = lbl.SetText(line)
+			_ = lbl.SetMinMaxSize(walk.Size{Width: 460}, walk.Size{Width: 460})
+			lbl.SetTextColor(rx(96, 104, 120))
+		}
+	}
+
+	row, err := walk.NewComposite(dlg)
+	if err != nil {
+		return
+	}
+	hbox := walk.NewHBoxLayout()
+	_ = hbox.SetMargins(walk.Margins{})
+	_ = hbox.SetSpacing(8)
+	_ = row.SetLayout(hbox)
+	if sp, serr := walk.NewHSpacer(row); serr == nil {
+		_ = sp
+	}
+	ok, err := walk.NewPushButton(row)
+	if err != nil {
+		return
+	}
+	_ = ok.SetText(tr("我已知晓"))
+	_ = ok.SetMinMaxSize(walk.Size{Width: 92, Height: 30}, walk.Size{Width: 92, Height: 30})
+	_ = dlg.SetDefaultButton(ok)
+	_ = dlg.SetCancelButton(ok)
+	ok.Clicked().Attach(func() { dlg.Accept() })
+
+	dlg.Run()
+}
+
+// showStartupNotice is the licence reminder every launch opens with: the
+// project is free and open source, and selling it is not allowed.
+func (u *natUI) showStartupNotice() {
+	u.infoDialog(tr("使用须知"), tr("本软件开源免费，仅供学习交流使用，禁止售卖！"), []string{
+		tr("本程序只在你自己的设备上配置一条加密隧道，"),
+		tr("不提供、不代理任何服务器资源，请遵守当地法律法规。"),
+		"",
+		tr("如果你是通过付费渠道拿到本软件的，说明你被骗了；"),
+		tr("请到项目主页免费下载：") + shortURL(repoURL),
+	})
+}
+
+// controlStoppedDialog explains a remote stop: what happened, which code this
+// install reports, and where to ask about it.
+func (u *natUI) controlStoppedDialog() {
+	msg := strings.TrimSpace(u.m.control.Message)
+	if msg == "" {
+		msg = defaultStopMessage
+	}
+	u.infoDialog(tr("客户端已停用"), msg, []string{
+		tr("控制码：") + u.m.set.ControlCode,
+		tr("如有疑问，请到项目主页反馈：") + shortURL(repoIssuesURL),
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Shell helpers
 // ---------------------------------------------------------------------------
@@ -262,27 +358,10 @@ func (u *natUI) openDataDir() {
 	openDir(dir)
 }
 
-// noticeFilePath locates the third-party notices shipped next to the binary.
-func noticeFilePath() (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	p := filepath.Join(filepath.Dir(exe), "THIRD_PARTY_NOTICES.md")
-	if _, err := os.Stat(p); err != nil {
-		return "", fmt.Errorf("not found: %s", p)
-	}
-	return p, nil
-}
-
-func opensNotice() error {
-	p, err := noticeFilePath()
-	if err != nil {
-		return err
-	}
-	openDir(p)
-	return nil
-}
+// noticeFilePath / opensNotice used to reveal THIRD_PARTY_NOTICES.md from the
+// program folder. The About page now links to the copy in the repository
+// instead: a local path is meaningless on another machine, in a screenshot, or
+// after a portable ZIP has been unpacked somewhere else.
 
 // mustCoreDir is the core directory, falling back to the process working
 // directory when the app home cannot be resolved.

@@ -393,14 +393,29 @@ func (u *natUI) actionAbout(id string) {
 		} else {
 			u.addLog(tr("诊断信息已复制到剪贴板"), false)
 		}
-	case "about:notices":
-		if err := opensNotice(); err != nil {
-			u.addLog(err.Error(), true)
+	case "about:copycode":
+		// The code is what the maintainer needs to stop (or un-stop) this
+		// install, so copying it beats asking the user to retype 16 characters.
+		if err := setClipboardText(u.m.set.ControlCode); err != nil {
+			u.addLog(tr("复制失败")+": "+err.Error(), true)
+		} else {
+			u.addLog(tr("控制码已复制到剪贴板"), false)
 		}
+	case "about:checkcontrol":
+		u.startControlCheck(true)
 	case "about:opendata":
+		// Still used by the Logs page's diagnostics tab.
 		u.openDataDir()
 	case "about:project":
-		openURL(projectURL)
+		openURL(repoURL)
+	case "about:releases":
+		openURL(repoReleasesURL)
+	case "about:issues":
+		openURL(repoIssuesURL)
+	case "about:notices":
+		openURL(repoNoticesURL)
+	case "about:license":
+		openURL(repoLicenseURL)
 	}
 }
 

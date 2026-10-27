@@ -148,6 +148,13 @@ type natModel struct {
 	updTime    time.Time
 	updBusy    bool
 	updNote    string
+
+	// Remote control: this install's code lives in the settings file, and
+	// control is the last verdict read from the published stop list. The
+	// verdict is cached on disk, so a restart cannot quietly put a stopped
+	// client back into service while the network is unreachable.
+	control     controlState
+	controlBusy bool
 }
 
 // natLog is one line of the log panel.
@@ -213,6 +220,11 @@ type natUI struct {
 	// candidate - and two repairs at once means two sets of core kills,
 	// state writes and proxy changes interleaved on one session.
 	repairing atomic.Bool
+
+	// controlChecking serialises the remote-control check: the periodic loop
+	// and the About page's button can fire at the same moment, and two checks
+	// racing on one cached verdict would let the slower (stale) answer win.
+	controlChecking atomic.Bool
 
 	// stateEpoch invalidates a status-loop tick that loaded state before a
 	// connect/disconnect/repair finished. Without it, an idle tick that was
@@ -307,6 +319,20 @@ func runNativeGUI(ctx context.Context, _ options) error {
 	u.m.set = loadSettings()
 	u.m.set.AutoStart = autoStartEnabled()
 	u.syncSessionFromSettings()
+
+	// Every install carries a control code from its first run: it is what the
+	// published stop list matches against, so it has to exist before the first
+	// check. Minting it here (not in the settings page) means a client that
+	// never opens Settings still reports an identity.
+	if u.m.set.ensureControlCode() {
+		if err := saveSettings(u.m.set); err != nil {
+			u.addLog(tr("设置保存失败: ")+err.Error(), true)
+		}
+	}
+	// The cached verdict is applied before any network call: a client stopped
+	// last run stays stopped even when this run starts offline.
+	u.m.control = loadControlState()
+	u.m.control.Code = u.m.set.ControlCode
 	u.applyTheme()
 	u.applyLang()
 
@@ -387,6 +413,17 @@ func runNativeGUI(ctx context.Context, _ options) error {
 	u.constrainWindowToWorkArea()
 	u.setWindowIcon()
 	u.invalidate()
+
+	// The licence reminder comes first: it is a condition of using this build,
+	// and it must not be buried under an auto-connect pipeline or a scan.
+	u.showStartupNotice()
+	if u.m.control.Stopped {
+		u.controlStoppedDialog()
+	}
+	// Check once now (the cached verdict may be hours old), then keep checking
+	// for as long as the window lives.
+	u.startControlCheck(false)
+	go u.controlLoop()
 
 	// Auto-connect starts here, after the window exists: the connect pipeline
 	// posts its progress through Synchronize, which is a PostMessage and simply
@@ -513,6 +550,70 @@ func enableDPIAwareness() {
 // ---------------------------------------------------------------------------
 // Workers
 // ---------------------------------------------------------------------------
+
+// controlLoop re-reads the published stop list while the window is open: a
+// session running when its code gets stopped is torn down on the next tick,
+// not on the next restart.
+func (u *natUI) controlLoop() {
+	t := time.NewTicker(controlCheckEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-u.ctx.Done():
+			return
+		case <-t.C:
+			u.sync(func() { u.startControlCheck(false) })
+		}
+	}
+}
+
+// startControlCheck runs on the GUI thread: it touches the model, then hands
+// the fetch to a worker that reports back through sync. manual is the About
+// page's button — only a manual check reports an unreachable list, because a
+// periodic one saying "still offline" every quarter hour is just noise.
+func (u *natUI) startControlCheck(manual bool) {
+	if !u.controlChecking.CompareAndSwap(false, true) {
+		return
+	}
+	u.m.controlBusy = true
+	u.invalidate()
+	code := u.m.set.ControlCode
+	prev := u.m.control
+	go func() {
+		st := evaluateControl(u.ctx, code, prev)
+		u.sync(func() {
+			u.controlChecking.Store(false)
+			u.m.controlBusy = false
+			wasStopped := u.m.control.Stopped
+			u.m.control = st
+			if err := saveControlState(st); err != nil {
+				u.addLog(tr("远程控制状态保存失败")+": "+err.Error(), true)
+			}
+			switch {
+			case st.Stopped && !wasStopped:
+				u.addLog(tr("远程控制：本机控制码已被停用"), true)
+				if u.m.connected && !u.m.working {
+					u.doDisconnect()
+				}
+				u.controlStoppedDialog()
+			case st.Stopped:
+				// Already known: keep a live session down, but do not repeat
+				// the dialog on every tick.
+				if u.m.connected && !u.m.working {
+					u.doDisconnect()
+				}
+				if manual {
+					u.controlStoppedDialog()
+				}
+			case manual && !st.Reached:
+				u.addLog(tr("远程控制：停用名单不可达（网络受限），沿用上次结果"), true)
+			case manual:
+				u.addLog(tr("远程控制：控制码正常"), false)
+			}
+			u.invalidate()
+		})
+	}()
+}
 
 func (u *natUI) statusLoop() {
 	t := time.NewTicker(2 * time.Second)
@@ -1406,6 +1507,13 @@ func (u *natUI) action(id string) {
 func (u *natUI) doConnect() {
 	m := u.m
 	if m.connecting || m.working {
+		return
+	}
+	// The stop list is the one thing that outranks the button: a stopped code
+	// explains itself instead of starting a pipeline that would fail anyway.
+	if m.control.Stopped {
+		u.addLog(tr("远程控制：客户端已停用，无法连接"), true)
+		u.controlStoppedDialog()
 		return
 	}
 	m.connecting = true

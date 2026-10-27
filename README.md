@@ -21,6 +21,7 @@ with an embedded Clash (mihomo) core for actual traffic routing.
 | System-proxy mode (default)         | ✅ WinINET registry + `InternetSetOption` notify |
 | TUN global mode (optional)          | ✅ mihomo `tun:` block (needs admin; wintun is embedded) |
 | Native GUI (double-click portable)    | ✅ sidebar shell — Home/Settings/About/Logs, light+dark theme, 中文/English |
+| Licence notice + remote control       | ✅ startup notice; per-install control code checked against `control.json` |
 | Portable ZIP, core separated        | ✅ `pack.ps1` → v2rayN-style layout |
 | Core one-click download/update      | ✅ GitHub releases auto-provision |
 
@@ -110,14 +111,14 @@ timeout) and DNS & exit:
 
 ![Logs](docs/screenshots/04-logs.png)
 
-**About** — versions, paths, licences, client and core updates:
-
-![About](docs/screenshots/05-about.png)
+The About page follows the same grid — this build, its licences, updates, the
+remote-control code, and one card of GitHub links — and is described in
+[Licence notice and remote control](#licence-notice-and-remote-control) below.
 
 The same window in English (the language pill lives in the Home header, so it
 never needs a trip to settings):
 
-![English UI](docs/screenshots/06-logs-en.png)
+![English UI](docs/screenshots/05-logs-en.png)
 
 Preferences live in `settings.json` next to the exe (portable layout) and are
 applied to the engine on connect: proxy mode and the domain lists become mihomo
@@ -130,6 +131,37 @@ cannot start.
 
 The GUI runs the exact same code path as the CLI
 (`defaultConnectOptions` → `runConnectCmd`), so behaviour cannot drift.
+
+### Licence notice and remote control
+
+Every launch opens with the licence reminder this project asks its builds to
+carry — **本软件开源免费，仅供学习交流使用，禁止售卖！** — and the same
+sentence stays at the foot of the About page, so it is still there after the
+notice has been dismissed. The About page itself points at nothing local: every
+row and button opens a GitHub address (project page, releases, issues, notices,
+licence text, core source), because a path on this disk is useless to anyone
+reading the page on another machine.
+
+Each install also carries a **control code** (`XXXX-XXXX-XXXX-XXXX`, shown and
+copyable on About), derived from the machine's Windows identity — so deleting
+`settings.json` does not mint a fresh one. The client reads
+[`control.json`](control.json) from the default branch at startup and every 15
+minutes:
+
+```json
+{
+  "stop_all": false,
+  "stopped_codes": ["ABCD-EFGH-JKMN-PQRS"],
+  "message": ""
+}
+```
+
+A listed code — or `stop_all` — stops that client: it refuses to connect, tears
+down a session that is already up, and says why on screen. `message` replaces
+the default sentence. The check is deliberately **fail-open**: an unreachable
+list keeps the previous verdict, so an offline laptop or a blocked GitHub never
+bricks a legitimate install, while the verdict is cached in `control-state.json`
+so a restart cannot quietly put a stopped client back into service.
 
 ## Architecture
 
@@ -158,6 +190,8 @@ warp-client (package main)            the warpscout engine (verbatim) +
 ├── gui_dialogs_windows.go ★         modal input/confirm, autostart, prefs plumbing
 ├── gui_native_stub.go ★             non-Windows no-op (native window = disabled)
 ├── settings.go        ★             settings.json model, load/save, normalisation
+├── control.go         ★             per-install control code + remote stop list
+├── control.json       ★             the published stop list the client reads
 │
 ├── internal/cache     ★             TTL cache store (account + scan results)
 └── internal/core      ★             mihomo sidecar manager + system proxy

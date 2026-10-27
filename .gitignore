@@ -11,6 +11,7 @@ warpscout-account.json
 state.json
 settings.json
 cache.json
+control-state.json
 
 # Bundled third-party runtimes and their data (80+ MB of binaries, not sources).
 # core/client.config also carries real Psiphon service credentials.
