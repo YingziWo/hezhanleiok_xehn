@@ -125,6 +125,10 @@ type clientState struct {
 	OpenVPNMode   bool         `json:"openvpn_mode,omitempty"`
 	OpenVPNRegion string       `json:"openvpn_region,omitempty"`
 	OpenVPNNode   *vpnGateNode `json:"openvpn_node,omitempty"`
+	// MeasuredBps is the connect-time throughput of this session's exit. It is
+	// runtime-only: state.json must not carry a stale speed into a later status
+	// read, and the cross-connect speed memory lives in vpngate-speeds.json.
+	MeasuredBps int64 `json:"-"`
 }
 
 func loadState() (clientState, error) {
@@ -256,9 +260,13 @@ func runCachedScan(ctx context.Context, opts options) ([]cachedEndpoint, protoRu
 			var cs cachedScan
 			if json.Unmarshal(raw, &cs) == nil {
 				if opts.through != "" {
+					stageMsg(fmt.Sprintf("[%s] 使用缓存端点（%d 个，扫描于 %s）",
+						protoLabel(opts.proto), len(cs.Results), cs.At.Format("01-02 15:04")))
 					return cs.Results, mustParseProto(opts.innerProto), nil
 				}
 				if cs.Proto == opts.proto {
+					stageMsg(fmt.Sprintf("[%s] 使用缓存端点（%d 个，扫描于 %s）",
+						protoLabel(opts.proto), len(cs.Results), cs.At.Format("01-02 15:04")))
 					return cs.Results, mustParseProto(opts.proto), nil
 				}
 			}
@@ -269,6 +277,7 @@ func runCachedScan(ctx context.Context, opts options) ([]cachedEndpoint, protoRu
 	if err != nil {
 		return nil, run, err
 	}
+	stageMsg(fmt.Sprintf("[%s] 端点扫描完成（%d 个结果）", protoLabel(opts.proto), len(results)))
 	// The cache's Proto records the user-facing protocol the scan ran under
 	// ("wwarp" for chains) so a later read can tell the two apart.
 	cs := cachedScan{Proto: scanKeyFor(opts), IPv6: opts.ipv6, At: time.Now(), Results: results}
@@ -408,7 +417,7 @@ func renderClientConfig(opts options, ce cachedEndpoint, run protoRun) ([]byte, 
 		if err != nil {
 			return nil, err
 		}
-		exit := append(mihomoOpenVPNProxy(profile), kv{"dialer-proxy", quoted(baseName)})
+		exit := append(mihomoOpenVPNProxy(profile, nestedMTU(opts.mtu)), kv{"dialer-proxy", quoted(baseName)})
 		proxyBody = renderProxiesYAML([][]kv{base, exit})
 		egressName = mihomoOpenVPNName
 	case opts.psiphonMode:
@@ -902,10 +911,19 @@ func verifyTunnel(opts options, logf func(string)) (clientState, error) {
 	// endpoint that handshakes and then stalls, or an exit throttled to nothing.
 	// One meaningful transfer has to complete, so such a tunnel fails HERE, where
 	// the candidate loop can rotate, instead of reaching the user as Connected.
+	// An OpenVPN exit downloads a larger payload: the same transfer also feeds
+	// the speed ranking, and 128 KiB cannot tell a healthy relay from one that
+	// merely avoided stalling.
+	payloadBytes, payloadTimeout := verifyPayloadBytes, verifyPayloadTimeout
+	if opts.openvpnMode {
+		payloadBytes, payloadTimeout = openvpnSpeedProbeBytes, openvpnSpeedProbeTimeout
+	}
 	logf("数据面验证：吞吐（下载载荷）…")
-	if terr := probeThroughput(opts.mixedPort, verifyPayloadBytes, verifyPayloadTimeout); terr != nil {
+	bps, terr := probeThroughput(opts.mixedPort, payloadBytes, payloadTimeout)
+	if terr != nil {
 		return probe, fmt.Errorf("隧道能握手但无法传输数据: %w", terr)
 	}
+	probe.MeasuredBps = bps
 	logf("吞吐验证成功")
 
 	// DNS, as its own line: the round-trip above proves it implicitly (every
@@ -1016,8 +1034,10 @@ func measureDownBps(mixedPort, bytes int, timeout time.Duration) int64 {
 
 // probeThroughput downloads want bytes through the tunnel and requires the full
 // amount inside the timeout, so a stalled or half-dead data plane is caught at
-// connect time rather than surfacing as "connected, but pages never load".
-func probeThroughput(mixedPort, want int, timeout time.Duration) error {
+// connect time rather than surfacing as "connected, but pages never load". The
+// returned bits per second cover the body transfer only (TLS setup and the
+// request are already done), which is what the speed floor compares.
+func probeThroughput(mixedPort, want int, timeout time.Duration) (int64, error) {
 	client := &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
@@ -1026,20 +1046,26 @@ func probeThroughput(mixedPort, want int, timeout time.Duration) error {
 	}
 	resp, err := client.Get(fmt.Sprintf("https://speed.cloudflare.com/__down?bytes=%d", want))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
+		return 0, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
+	start := time.Now()
 	n, err := io.Copy(io.Discard, io.LimitReader(resp.Body, int64(want)))
+	elapsed := time.Since(start).Seconds()
+	var bps int64
+	if elapsed > 0 && n > 0 {
+		bps = int64(float64(n) / elapsed)
+	}
 	if err != nil {
-		return fmt.Errorf("传输中断于 %d/%d 字节: %w", n, want, err)
+		return bps, fmt.Errorf("传输中断于 %d/%d 字节: %w", n, want, err)
 	}
 	if n < int64(want) {
-		return fmt.Errorf("仅收到 %d/%d 字节", n, want)
+		return bps, fmt.Errorf("仅收到 %d/%d 字节", n, want)
 	}
-	return nil
+	return bps, nil
 }
 
 func mustParseURL(u string) *url.URL {

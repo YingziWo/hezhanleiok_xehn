@@ -68,6 +68,11 @@ const (
 	// is not chased after the cache has refreshed several times.
 	vpnGateLastTTL  = 6 * time.Hour
 	vpnGateLastName = "vpngate-last.json"
+	// vpnGateSpeedTTL bounds the measured-throughput memory. VPN Gate relays are
+	// volunteer lines whose speed moves by the hour; a stale "fast" verdict must
+	// not outlive the cache it was measured against.
+	vpnGateSpeedTTL  = 6 * time.Hour
+	vpnGateSpeedName = "vpngate-speeds.json"
 )
 
 // vpnGateNode is one VPN Gate relay with its decoded OpenVPN profile.
@@ -93,6 +98,10 @@ type vpnGateNode struct {
 	// LatencyMS is measured locally (through the WARP underlay when the list
 	// itself had to be fetched that way); never persisted.
 	LatencyMS int64 `json:"-"`
+	// MeasuredBps is this client's own connect-time throughput for the relay
+	// (vpngate-speeds.json), not the API's self-reported speed. It only ranks
+	// candidates; it never excludes one.
+	MeasuredBps int64 `json:"-"`
 }
 
 func (n vpnGateNode) endpoint() string { return net.JoinHostPort(n.IP, strconv.Itoa(n.Port)) }
@@ -960,6 +969,20 @@ func vpnGateCandidates(ctx context.Context, nodes []vpnGateNode, region, pin str
 	if len(valid) == 0 {
 		return nil
 	}
+	// Attach this client's own measurements before anything sorts or probes:
+	// the sort below ranks measured-fast relays first and measured-slow ones
+	// behind untested candidates, and the pinned node must carry its speed too.
+	speeds := vpnGateSpeedSnapshot()
+	for i := range valid {
+		if bps, ok := speeds[valid[i].id()]; ok {
+			valid[i].MeasuredBps = bps
+		}
+	}
+	if pinNode != nil {
+		if bps, ok := speeds[pinNode.id()]; ok {
+			pinNode.MeasuredBps = bps
+		}
+	}
 	targetCC := region
 	targetCls := ""
 	if pinNode != nil {
@@ -1194,6 +1217,107 @@ func freshVPNGateNodes(nodes []vpnGateNode) []vpnGateNode {
 	return fresh
 }
 
+// ---- measured-speed memory ----
+
+// vpnGateSpeedFile persists this client's own measurements so the next connect
+// ranks relays by what they actually delivered, not by VPN Gate's self-reported
+// speed or a latency that says nothing about throughput.
+type vpnGateSpeedFile struct {
+	At map[string]vpnGateSpeedEntry `json:"at"`
+}
+
+type vpnGateSpeedEntry struct {
+	Bps int64     `json:"bps"`
+	At  time.Time `json:"at"`
+}
+
+var vpnGateSpeedMu sync.Mutex
+
+func vpnGateSpeedPath() (string, error) {
+	d, err := appDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, vpnGateSpeedName), nil
+}
+
+func loadVPNGateSpeedsLocked() map[string]vpnGateSpeedEntry {
+	p, err := vpnGateSpeedPath()
+	if err != nil {
+		return map[string]vpnGateSpeedEntry{}
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		return map[string]vpnGateSpeedEntry{}
+	}
+	var f vpnGateSpeedFile
+	if json.Unmarshal(raw, &f) != nil || f.At == nil {
+		return map[string]vpnGateSpeedEntry{}
+	}
+	return f.At
+}
+
+func saveVPNGateSpeedsLocked(m map[string]vpnGateSpeedEntry) {
+	p, err := vpnGateSpeedPath()
+	if err != nil {
+		return
+	}
+	raw, err := json.MarshalIndent(vpnGateSpeedFile{At: m}, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(p, raw, 0o600)
+}
+
+// rememberVPNGateSpeed records one usable measurement. A relay rejected as slow
+// is recorded too: the ranking needs to know it is slow, not forget it exists.
+func rememberVPNGateSpeed(id string, bps int64) {
+	if id == "" || bps <= 0 {
+		return
+	}
+	vpnGateSpeedMu.Lock()
+	defer vpnGateSpeedMu.Unlock()
+	m := loadVPNGateSpeedsLocked()
+	now := time.Now()
+	for k, v := range m {
+		if now.Sub(v.At) >= vpnGateSpeedTTL {
+			delete(m, k)
+		}
+	}
+	m[id] = vpnGateSpeedEntry{Bps: bps, At: now}
+	saveVPNGateSpeedsLocked(m)
+}
+
+// vpnGateSpeedSnapshot returns the unexpired bps per relay id. Expired entries
+// are ignored here and pruned on the next write.
+func vpnGateSpeedSnapshot() map[string]int64 {
+	vpnGateSpeedMu.Lock()
+	defer vpnGateSpeedMu.Unlock()
+	out := map[string]int64{}
+	now := time.Now()
+	for id, v := range loadVPNGateSpeedsLocked() {
+		if now.Sub(v.At) < vpnGateSpeedTTL {
+			out[id] = v.Bps
+		}
+	}
+	return out
+}
+
+// vpnGateSpeedTier buckets a relay by its measured throughput: fast, untested,
+// slow. Untested sits between the two so a fresh candidate gets a chance, while
+// a relay measured below the usable floor can never outrank it — including the
+// last known-good relay, which used to pin a slow node to the front.
+func vpnGateSpeedTier(bps int64) int {
+	switch {
+	case bps <= 0:
+		return 1
+	case bps >= openvpnMinBps:
+		return 0
+	default:
+		return 2
+	}
+}
+
 // vpnGateLastFile is the last relay that carried real traffic. Only the id is
 // stored: the profile still comes from the current pool, so a stale file can
 // never resurrect a relay that is no longer offered.
@@ -1274,6 +1398,12 @@ func preferLastGoodVPNGate(relays []vpnGateNode, pin, region string) []vpnGateNo
 		if n.id() != last.ID {
 			continue
 		}
+		// "Last good" only remembers that a relay carried traffic, not that it
+		// was fast. A node measured below the floor must not be promoted over
+		// untested relays: that is exactly how the slow node stayed sticky.
+		if n.MeasuredBps > 0 && n.MeasuredBps < openvpnMinBps {
+			return relays
+		}
 		if i == 0 {
 			return relays
 		}
@@ -1327,13 +1457,21 @@ func measureVPNGateLatency(ctx context.Context, nodes []vpnGateNode) {
 }
 
 // sortVPNGateNodesByLatency is the picker's order: the residential block before
-// the datacenter fleet, then measured latency, then the API's own ping/score
-// for anything the probe could not reach.
+// the datacenter fleet, then this client's own measured throughput (fast,
+// untested, slow), then measured latency, then the API's own ping/score for
+// anything the probe could not reach.
 func sortVPNGateNodesByLatency(nodes []vpnGateNode) {
 	sort.SliceStable(nodes, func(i, j int) bool {
 		a, b := nodes[i], nodes[j]
 		if ra, rb := a.classRank(), b.classRank(); ra != rb {
 			return ra < rb
+		}
+		at, bt := vpnGateSpeedTier(a.MeasuredBps), vpnGateSpeedTier(b.MeasuredBps)
+		if at != bt {
+			return at < bt
+		}
+		if at != 1 && a.MeasuredBps != b.MeasuredBps {
+			return a.MeasuredBps > b.MeasuredBps
 		}
 		am, bm := a.LatencyMS > 0, b.LatencyMS > 0
 		if am != bm {

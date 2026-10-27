@@ -6,9 +6,9 @@
 【快速开始】
 
   1. 解压到任意可写目录
-  2. 双击 warp-client-gui.exe
+  2. 双击 warp-client.exe
      → 弹出原生图形窗口(深色 Proton 风格,非网页)
-     → 首次点击「连接」会自动注册 WARP 账号 + 扫描最优端点
+     → 首次点击「连接」会自动注册本设备的 WARP 账号 + 扫描最优端点
   3. 窗口内即可看到:出口 IP、国家、延迟、Colo 节点,以及实时延迟图表
 
 【图形界面说明】
@@ -26,12 +26,12 @@
      点击某行即可锁定该端点(固定连接)
   · 底栏「核心」:未安装时可一键下载 Clash 核心
 
-  TUN 全局模式:右键 warp-client-gui.exe → 以管理员身份运行
+  TUN 全局模式:右键 warp-client.exe → 以管理员身份运行
 
 【目录说明】
 
-  warp-client-gui.exe   双击启动,原生图形窗口
-  warp-client.exe       命令行版(终端使用,功能相同)
+  warp-client.exe       唯一的程序文件:双击启动原生图形窗口;
+                        带子命令运行时作为命令行工具(输出到当前终端)
   core\
     mihomo.exe          Clash 核心 — 独立文件,可单独替换更新
     psiphon.exe         (可选) Psiphon 出口组件 — 独立可执行文件 (GPL-3.0)
@@ -42,11 +42,18 @@
   THIRD_PARTY_NOTICES.md  第三方组件清单与再分发义务(再分发前请阅读)
 
   运行时自动生成(都在本目录内,删除即重置):
-    warpscout-account.json   WARP 账号
+    warpscout-account.json   本设备的 WARP 账号(首次连接/扫描时自动注册)
     cache.json               扫描结果缓存(6 小时有效)
     state.json               连接状态
     core\config.yaml         mihomo 配置
     warp-client.log          日志
+
+【分发到新设备】
+
+  ZIP 内不含任何账号数据。把解压后的目录拷到另一台电脑时,首次连接或扫描
+  会自动为那台设备注册新的 WARP 账号。
+  不要把本机的 warpscout-account.json 一起复制过去 — 它代表当前设备的
+  WARP 身份,带过去会沿用旧账号而不是重新注册。
 
 【核心更新(核心分离设计)】
 
@@ -56,6 +63,10 @@
          放入 core\ 目录(https://github.com/MetaCubeX/mihomo/releases)
 
 【命令行用法】
+
+  与 GUI 是同一个 warp-client.exe,在终端带子命令运行即可。
+  注意:该 exe 为窗口子系统,cmd 不会等待命令结束(提示符会先返回);
+  注册/连接仍在后台继续,输出显示在当前终端。
 
   warp-client.exe register              注册 WARP 账号
   warp-client.exe connect -p awg        连接(awg/wg/masque/masque-h2)

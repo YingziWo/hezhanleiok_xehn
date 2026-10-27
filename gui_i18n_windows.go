@@ -128,6 +128,10 @@ var enStrings = map[string]string{
 	"正在扫描 WARP 端点（约 1-2 分钟）…":        "Scanning WARP endpoints (1-2 min)…",
 	"节点列表获取失败：%s（点击重试）":            "Could not fetch the node list: %s (click to retry)",
 	"节点列表获取失败：请点击重试":                "Could not fetch the node list; click to retry",
+	"VPN Gate 节点正在刷新中…":              "VPN Gate refresh already in progress…",
+	"VPN Gate 节点获取失败：节点列表为空":          "VPN Gate fetch failed: empty node list",
+	"本机代理":                            "Local proxy",
+	"WARP 隧道":                           "WARP tunnel",
 	"刷新中…":                            "Refreshing…",
 	"本程序 · 开源许可 · 客户端更新 · 内核": "About · Licenses · Updates · Core",
 
@@ -388,6 +392,10 @@ var enFormats = map[string]string{
 	"%s 不能与另一个端口相同":     "%s must differ from the other port",
 	"无效的 DNS 地址: %s":    "Invalid DNS address: %s",
 	"%s 不支持 IPv6：请先切换协议": "%s cannot carry IPv6: switch protocol first",
+	"VPN Gate 节点获取成功：%d 个节点，%d 个国家（%s）": "VPN Gate nodes fetched: %d nodes, %d countries (%s)",
+	"VPN Gate 节点获取失败：%s":                    "VPN Gate fetch failed: %s",
+	"VPN Gate 节点刷新失败：%s（沿用缓存列表）":           "VPN Gate refresh failed: %s (using cached list)",
+	"%d 行日志已复制到剪贴板":                      "%d log lines copied to clipboard",
 }
 
 // tr translates a UI string. Chinese is the source language, so zh needs no

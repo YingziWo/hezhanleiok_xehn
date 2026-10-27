@@ -11,8 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lxn/walk"
-
 	"github.com/xhwarp/warp-client/internal/core"
 )
 
@@ -390,7 +388,7 @@ func (u *natUI) syncSessionFromSettings() {
 func (u *natUI) actionAbout(id string) {
 	switch id {
 	case "about:copydiag":
-		if err := walk.Clipboard().SetText(u.diagText()); err != nil {
+		if err := setClipboardText(u.diagText()); err != nil {
 			u.addLog(tr("复制失败")+": "+err.Error(), true)
 		} else {
 			u.addLog(tr("诊断信息已复制到剪贴板"), false)

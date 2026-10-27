@@ -96,6 +96,59 @@ func TestParseVPNGateCSV(t *testing.T) {
 	}
 }
 
+// TestOpenVPNMTUNestedCap pins the MTU policy: mihomo defaults the openvpn
+// outbound to 1500 and VPN Gate profiles carry no MTU, so a UDP relay inside a
+// ~1280-byte base tunnel must be capped; a TCP relay rides a byte stream and
+// keeps the default; a profile that asks for less keeps its own value.
+func TestOpenVPNMTUNestedCap(t *testing.T) {
+	udp := strings.Replace(testOVPNProfile, "proto tcp", "proto udp", 1)
+	p, err := parseOVPNProfile(udp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := renderProxiesYAML([][]kv{mihomoOpenVPNProxy(p, 1220)})
+	if !strings.Contains(out, "mtu: 1220") {
+		t.Fatalf("UDP relay must be capped to the nested budget:\n%s", out)
+	}
+
+	tcp, err := parseOVPNProfile(testOVPNProfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = renderProxiesYAML([][]kv{mihomoOpenVPNProxy(tcp, 1220)})
+	if strings.Contains(out, "mtu:") {
+		t.Fatalf("TCP relay must keep mihomo's default MTU:\n%s", out)
+	}
+
+	small := strings.Replace(udp, "dev tun", "dev tun\nmtu 1200", 1)
+	sp, err := parseOVPNProfile(small)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = renderProxiesYAML([][]kv{mihomoOpenVPNProxy(sp, 1220)})
+	if !strings.Contains(out, "mtu: 1200") {
+		t.Fatalf("a smaller profile MTU must win:\n%s", out)
+	}
+}
+
+// TestVPNGateSpeedRanking pins the speed memory's order: measured-fast first,
+// untested next, measured-slow last — so a relay that once carried traffic but
+// now crawls cannot stay in front of candidates nobody has measured.
+func TestVPNGateSpeedRanking(t *testing.T) {
+	nodes := []vpnGateNode{
+		{CountryShort: "JP", IP: "198.51.100.1", Port: 443, Proto: "tcp", Class: "residential", MeasuredBps: 50 * 1024},
+		{CountryShort: "JP", IP: "198.51.100.2", Port: 443, Proto: "tcp", Class: "residential"},
+		{CountryShort: "JP", IP: "198.51.100.3", Port: 443, Proto: "tcp", Class: "residential", MeasuredBps: 1024 * 1024},
+	}
+	sortVPNGateNodesByLatency(nodes)
+	want := []string{"198.51.100.3", "198.51.100.2", "198.51.100.1"}
+	for i, ip := range want {
+		if nodes[i].IP != ip {
+			t.Fatalf("order[%d] = %s, want %s (full: %+v)", i, nodes[i].IP, ip, nodes)
+		}
+	}
+}
+
 func TestVPNGateCountries(t *testing.T) {
 	nodes := []vpnGateNode{
 		{CountryShort: "JP", CountryLong: "Japan"},

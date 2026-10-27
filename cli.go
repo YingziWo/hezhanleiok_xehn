@@ -197,6 +197,7 @@ func main() {
 		debug.SetMemoryLimit(defaultMemLimit)
 	}
 	stripLoaderArg()
+	attachParentConsole()
 	enableVirtualTerminal()
 	errPal = palette{enabled: colorEnabled(os.Stderr)}
 

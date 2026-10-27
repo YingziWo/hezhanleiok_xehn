@@ -136,6 +136,8 @@ type natModel struct {
 	nodeSort        string
 	nodeVisibleRows int
 	logTab          string
+	logScroll       int // run-log lines scrolled up from the newest; 0 follows live
+	logVisibleRows  int // rows the last run-log paint could show
 
 	// set is the persisted preference file, kept in the model so every page
 	// renders straight from it.
@@ -818,6 +820,10 @@ func (u *natUI) reloadEndpoints(force bool) {
 // force (optional) skips the cache age check, for the popup's retry action.
 func (u *natUI) refreshVPNGatePool(force ...bool) {
 	if u.m.vpnPoolBusy {
+		if len(force) > 0 && force[0] {
+			u.addLog(tr("VPN Gate 节点正在刷新中…"), false)
+			u.invalidate()
+		}
 		return
 	}
 	forced := len(force) > 0 && force[0]
@@ -833,9 +839,10 @@ func (u *natUI) refreshVPNGatePool(force ...bool) {
 	}
 	u.m.vpnPoolBusy = true
 	u.m.vpnPoolNote = tr("正在获取 VPN Gate 节点…")
+	u.addLog(tr("正在获取 VPN Gate 节点…"), false)
 	u.invalidate()
 	go func() {
-		fresh, err := u.fetchVPNGatePool()
+		fresh, route, err := u.fetchVPNGatePool()
 		if len(fresh) > 0 {
 			saveVPNGateCache(fresh)
 		}
@@ -847,16 +854,23 @@ func (u *natUI) refreshVPNGatePool(force ...bool) {
 				u.m.vpnCountries = vpnGateCountries(fresh)
 				u.m.vpnMeasured = true
 				u.m.vpnPoolNote = ""
+				u.addLog(trf("VPN Gate 节点获取成功：%d 个节点，%d 个国家（%s）",
+					len(fresh), len(u.m.vpnCountries), tr(route)), false)
 			case len(u.m.vpnNodes) == 0:
 				if err != nil {
 					u.m.vpnPoolNote = trf("节点列表获取失败：%s（点击重试）", vpnShortErr(err))
+					u.addLog(trf("VPN Gate 节点获取失败：%s", vpnShortErr(err)), true)
 				} else {
 					u.m.vpnPoolNote = tr("节点列表获取失败：请点击重试")
+					u.addLog(tr("VPN Gate 节点获取失败：节点列表为空"), true)
 				}
 			default:
 				// Keep the stale countries usable; the note is only shown when
 				// the popup has nothing else to display.
 				u.m.vpnPoolNote = ""
+				if err != nil {
+					u.addLog(trf("VPN Gate 节点刷新失败：%s（沿用缓存列表）", vpnShortErr(err)), true)
+				}
 			}
 			u.invalidate()
 		})
@@ -864,8 +878,9 @@ func (u *natUI) refreshVPNGatePool(force ...bool) {
 }
 
 // fetchVPNGatePool runs the whole fetch pipeline off the GUI thread and probes
-// latency through whichever route delivered the list.
-func (u *natUI) fetchVPNGatePool() ([]vpnGateNode, error) {
+// latency through whichever route delivered the list. route names the path that
+// answered, for the run log.
+func (u *natUI) fetchVPNGatePool() ([]vpnGateNode, string, error) {
 	directErr := error(nil)
 	if raw, err := fetchVPNGateDirect(u.ctx); err == nil {
 		if nodes := parseVPNGateCSV(raw); len(nodes) > 0 {
@@ -876,7 +891,7 @@ func (u *natUI) fetchVPNGatePool() ([]vpnGateNode, error) {
 			u.sync(func() { u.m.vpnPoolNote = tr("正在测量节点延迟…") })
 			measureVPNGateLatency(u.ctx, nodes)
 			sortVPNGateNodesByLatency(nodes)
-			return nodes, nil
+			return nodes, "直连", nil
 		}
 		directErr = fmt.Errorf("VPN Gate 返回的列表为空")
 	} else {
@@ -894,19 +909,23 @@ func (u *natUI) fetchVPNGatePool() ([]vpnGateNode, error) {
 				u.sync(func() { u.m.vpnPoolNote = tr("正在测量节点延迟…") })
 				measureVPNGateLatency(u.ctx, nodes)
 				sortVPNGateNodesByLatency(nodes)
-				return nodes, nil
+				return nodes, "本机代理", nil
 			}
 		} else {
 			proxyErr = perr
 		}
 	}
 
-	u.sync(func() { u.m.vpnPoolNote = tr("直连不可用，正在经 WARP 获取节点…") })
+	u.sync(func() {
+		u.m.vpnPoolNote = tr("直连不可用，正在经 WARP 获取节点…")
+		u.addLog(tr("直连不可用，正在经 WARP 获取节点…"), false)
+		u.invalidate()
+	})
 	nodes, werr := u.fetchVPNGatePoolViaWARP()
 	if werr != nil {
-		return nil, fmt.Errorf("%s；WARP: %s", vpnShortErr(proxyErr), vpnShortErr(werr))
+		return nil, "", fmt.Errorf("%s；WARP: %s", vpnShortErr(proxyErr), vpnShortErr(werr))
 	}
-	return nodes, nil
+	return nodes, "WARP 隧道", nil
 }
 
 // fetchVPNGatePoolViaWARP builds a throwaway tunnel on the protocol the user
@@ -952,7 +971,11 @@ func (u *natUI) fetchVPNGatePoolViaWARP() ([]vpnGateNode, error) {
 				prefer = ""
 			}
 		}
-		u.sync(func() { u.m.vpnPoolNote = tr("正在扫描 WARP 端点（约 1-2 分钟）…") })
+		u.sync(func() {
+			u.m.vpnPoolNote = tr("正在扫描 WARP 端点（约 1-2 分钟）…")
+			u.addLog(tr("正在扫描 WARP 端点（约 1-2 分钟）…"), false)
+			u.invalidate()
+		})
 		fresh, _, err := runCachedScan(u.ctx, opts)
 		if err != nil {
 			if quickErr != nil {
@@ -1103,10 +1126,52 @@ func (u *natUI) addLogFull(text string, lv int, core bool) {
 func (u *natUI) addLogStage(text string) { u.appendLog(text, 0, false, true) }
 
 func (u *natUI) appendLog(text string, lv int, core, stage bool) {
+	// The full session log is kept: copy, diagnostics and scrollback must be
+	// able to reach every line, so dropping old entries here silently shortened
+	// exactly the history a failed connect needs.
 	u.m.logs = append(u.m.logs, natLog{at: time.Now(), text: text, lv: lv, core: core, stage: stage})
-	if n := len(u.m.logs); n > 400 {
-		u.m.logs = u.m.logs[n-400:]
+}
+
+// logText renders every retained line for the clipboard and diagnostics. The
+// panel shows one screenful at a time; copying must not inherit that limit.
+func (u *natUI) logText() string {
+	var b strings.Builder
+	for _, l := range u.m.logs {
+		b.WriteString(l.at.Format("2006-01-02 15:04:05 "))
+		switch {
+		case l.lv == 2:
+			b.WriteString("ERR  ")
+		case l.lv == 1:
+			b.WriteString("WARN ")
+		case l.core:
+			b.WriteString("CORE ")
+		default:
+			b.WriteString("INFO ")
+		}
+		b.WriteString(l.text)
+		b.WriteString("\r\n")
 	}
+	return b.String()
+}
+
+// setClipboardText retries the hand-off: a screenshot tool or clipboard manager
+// can hold the clipboard open for a few dozen milliseconds, and a one-shot
+// SetText then fails while the previous content (often an image) stays behind.
+// Clearing first matters too: walk sets only CF_UNICODETEXT, and leftover
+// formats from a screenshot otherwise survive and paste back as an image.
+func setClipboardText(text string) error {
+	var err error
+	for i := 0; i < 8; i++ {
+		if err = walk.Clipboard().Clear(); err != nil {
+			time.Sleep(30 * time.Millisecond)
+			continue
+		}
+		if err = walk.Clipboard().SetText(text); err == nil {
+			return nil
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	return err
 }
 
 func (u *natUI) action(id string) {
@@ -1278,7 +1343,7 @@ func (u *natUI) action(id string) {
 		u.invalidate()
 	case id == "copyip":
 		if ip := u.displayIP(); ip != "" {
-			if err := walk.Clipboard().SetText(ip); err != nil {
+			if err := setClipboardText(ip); err != nil {
 				u.addLog(tr("复制失败")+": "+err.Error(), true)
 			} else {
 				u.addLog(tr("已复制到剪贴板"), false)
@@ -1317,24 +1382,20 @@ func (u *natUI) action(id string) {
 		u.reloadEndpoints(true)
 	case id == "logclear":
 		u.m.logs = nil
+		u.m.logScroll = 0
 		u.invalidate()
 	case id == "proxyretry":
 		go u.retryProxySet()
 	case id == "logcopy":
-		if len(u.m.logs) > 0 {
-			var b strings.Builder
-			for _, l := range u.m.logs {
-				b.WriteString(l.at.Format("15:04:05 "))
-				b.WriteString(l.text)
-				b.WriteString("\r\n")
-			}
-			if err := walk.Clipboard().SetText(b.String()); err != nil {
-				u.addLog(tr("复制失败")+": "+err.Error(), true)
-			} else {
-				u.addLog(tr("日志已复制到剪贴板"), false)
-			}
-			u.invalidate()
+		if len(u.m.logs) == 0 {
+			return
 		}
+		if err := setClipboardText(u.logText()); err != nil {
+			u.addLog(tr("复制失败")+": "+err.Error(), true)
+		} else {
+			u.addLog(trf("%d 行日志已复制到剪贴板", len(u.m.logs)), false)
+		}
+		u.invalidate()
 	default:
 		// Page switcher, settings, about and update: all defined in
 		// gui_pages_windows.go, keyed by their id prefix.
@@ -1671,6 +1732,25 @@ func (u *natUI) onWheel(x, y int, b walk.MouseButton) {
 		}
 		if u.m.vpnScroll > max {
 			u.m.vpnScroll = max
+		}
+		u.invalidate()
+		return
+	}
+	if u.m.page == pageLogs && u.m.logTab == "run" {
+		rows := u.m.logVisibleRows
+		if rows < 1 {
+			rows = 1
+		}
+		max := len(u.m.logs) - rows
+		if max < 0 {
+			max = 0
+		}
+		u.m.logScroll -= delta / 40
+		if u.m.logScroll < 0 {
+			u.m.logScroll = 0
+		}
+		if u.m.logScroll > max {
+			u.m.logScroll = max
 		}
 		u.invalidate()
 		return

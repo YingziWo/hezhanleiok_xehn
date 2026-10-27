@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -66,7 +67,31 @@ const (
 	// request is a handshake trigger, not a transfer, and a dead combination
 	// must fail fast enough for the next candidate to get a turn.
 	openvpnWarmupReqTimeout = 4 * time.Second
+	// openvpnSpeedProbeBytes / openvpnSpeedProbeTimeout are the verification
+	// transfer for an OpenVPN exit. Larger than the generic 128 KiB gate
+	// because the same transfer also feeds the speed ranking: 128 KiB is
+	// dominated by TCP slow start and cannot separate a fast relay from one
+	// that merely avoided stalling.
+	openvpnSpeedProbeBytes   = 512 * 1024
+	openvpnSpeedProbeTimeout = 12 * time.Second
+	// openvpnMinBps is the usable-speed floor. Relays below it make every page
+	// crawl; the connect loop rotates past up to openvpnSpeedRetries of them,
+	// then keeps the next working relay anyway because slow beats nothing.
+	// The floor sits far above the generic gate's ~11 KB/s, which this relay
+	// class was passing while delivering ~14 KB/s.
+	openvpnMinBps       = 150 * 1024
+	openvpnSpeedRetries = 2
 )
+
+// slowRelayError marks a relay that passed every data-plane check but measured
+// below the usable-speed floor. The connect loop rotates past it without
+// blacklisting it (the relay works, so a later connect may still use it when
+// nothing faster is left), and the speed memory keeps it out of the front.
+type slowRelayError struct{ bps int64 }
+
+func (e *slowRelayError) Error() string {
+	return fmt.Sprintf("出口实测速度过慢（≈%d KB/s，低于 %d KB/s）", e.bps/1024, openvpnMinBps/1024)
+}
 
 // proxyHelperAllowed gates the UAC elevation fallback: only the windowsgui
 // build (double-clicked GUI) may relaunch itself elevated — a console binary
@@ -275,6 +300,8 @@ func runConnectCmd(ctx context.Context, opts options) error {
 			return fmt.Errorf("no working endpoint found")
 		}
 	}
+	stageMsg(fmt.Sprintf("[%s] 可用端点 %d 个，首选 %s (%s %s)",
+		label, len(cands), cands[0].Endpoint, cands[0].Country, cands[0].Colo))
 	fmt.Fprintln(os.Stderr, errPal.ok(fmt.Sprintf("best endpoint: %s (%s) → %s %s",
 		cands[0].Endpoint, label, cands[0].Country, cands[0].Colo)))
 
@@ -301,7 +328,7 @@ func runConnectCmd(ctx context.Context, opts options) error {
 	stageMsg(fmt.Sprintf("[%s] 准备 Clash 核心…", label))
 	bin, err := core.EnsureBinary(cDir, opts.corePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("Clash 核心不可用（应位于 %s）：%w；请放入 mihomo.exe 或用底栏「核心」按钮下载", core.CoreInDir(cDir), err)
 	}
 	// Capability gate: never render a protocol the running core cannot parse.
 	// Each probe feeds the real binary a minimal config of exactly the shape
@@ -320,6 +347,7 @@ func runConnectCmd(ctx context.Context, opts options) error {
 			return fmt.Errorf("当前 Core 不支持 %s 协议配置，请升级 Core（Mihomo 官方最新版）", protoLabel(p))
 		}
 	}
+	stageMsg(fmt.Sprintf("[%s] Clash 核心就绪，协议配置校验通过", label))
 	// A client that died without disconnecting (crash, Task Manager, security
 	// software) leaves its core running; that core holds the mixed and API
 	// ports, and every endpoint of this connect then fails with "port still in
@@ -599,6 +627,9 @@ func runConnectOpenVPN(ctx context.Context, opts options) error {
 	opts.family = famV4
 	opts.ipv6 = false
 	outer = nil
+	// An interactive connect shops for a usable exit; the health repair builds
+	// its own options and deliberately leaves this off.
+	opts.openvpnSpeedGate = true
 
 	label := protoLabel(opts.proto) + "+OpenVPN"
 	stageMsg(fmt.Sprintf("[%s] 开始连接：先起基础协议，再经 VPN Gate 节点出站…", label))
@@ -606,6 +637,7 @@ func runConnectOpenVPN(ctx context.Context, opts options) error {
 	if err := ensureAccount(ctx, opts); err != nil {
 		return fmt.Errorf("account: %w", err)
 	}
+	stageMsg(fmt.Sprintf("[%s] 账号就绪，读取/扫描基础端点…", label))
 	results, run, err := runCachedScan(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("scan failed: %w", err)
@@ -635,14 +667,16 @@ func runConnectOpenVPN(ctx context.Context, opts options) error {
 			return fmt.Errorf("no working endpoint found")
 		}
 	}
+	stageMsg(fmt.Sprintf("[%s] 基础端点 %d 个可用", label, len(cands)))
 
 	cDir, err := coreDir()
 	if err != nil {
 		return err
 	}
+	stageMsg(fmt.Sprintf("[%s] 准备 Clash 核心…", label))
 	bin, err := core.EnsureBinary(cDir, opts.corePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("Clash 核心不可用（应位于 %s）：%w；请放入 mihomo.exe 或用底栏「核心」按钮下载", core.CoreInDir(cDir), err)
 	}
 	if !protoSupportedBy(bin, cDir, opts.proto) {
 		return fmt.Errorf("当前 Core 不支持 %s 协议配置，请升级 Core（Mihomo 官方最新版）", protoLabel(opts.proto))
@@ -650,6 +684,7 @@ func runConnectOpenVPN(ctx context.Context, opts options) error {
 	if !protoSupportedBy(bin, cDir, probeOpenVPNProto) {
 		return fmt.Errorf("当前 Core 不支持 OpenVPN 出站配置，请升级 Core（Mihomo 官方最新版）")
 	}
+	stageMsg(fmt.Sprintf("[%s] Clash 核心就绪，协议配置校验通过", label))
 	// Reap anything a previous session left behind: the core outlives the CLI,
 	// and its pid would otherwise keep the mixed port and the state file busy.
 	if st, lerr := loadState(); lerr == nil {
@@ -684,9 +719,21 @@ func runConnectOpenVPN(ctx context.Context, opts options) error {
 		}
 		return fmt.Errorf("VPN Gate 节点列表为空，请稍后重试")
 	}
+	measured := 0
+	for _, n := range relays {
+		if n.MeasuredBps > 0 {
+			measured++
+		}
+	}
+	if measured > 0 {
+		stageMsg(fmt.Sprintf("[%s] 中继速度记忆：%d 个有实测记录，排序已按实测速度优先", label, measured))
+	}
+	stageMsg(fmt.Sprintf("[%s] 出口候选：%d 个基础端点 × %d 个 VPN Gate 节点（最多尝试 %d 组）",
+		label, len(cands), len(relays), min(openvpnMaxAttempts, len(cands)*len(relays))))
 
 	var lastErr error
 	tried := 0
+	slowRejects := 0
 	for _, ce := range cands {
 		for i := range relays {
 			if tried >= openvpnMaxAttempts {
@@ -698,6 +745,23 @@ func runConnectOpenVPN(ctx context.Context, opts options) error {
 			stageMsg(fmt.Sprintf("[%s] 基础端点 %s + 出口节点 %s（%s，组合 %d/%d）…",
 				label, ce.Endpoint, node.id(), node.CountryShort, tried, min(openvpnMaxAttempts, len(cands)*len(relays))))
 			state, serr := startAndVerify(ctx, opts, ce, run, bin, cDir, label, nil)
+			if serr != nil {
+				var slow *slowRelayError
+				if errors.As(serr, &slow) {
+					// The relay works; only its throughput is unusable. Keep it
+					// out of the failure memory — the speed memory already ranks
+					// it behind everything else — and spend the next attempt on a
+					// different relay.
+					lastErr = serr
+					slowRejects++
+					stageMsg(fmt.Sprintf("[%s] 出口速度过慢（≈%d KB/s），换下一个中继…", label, slow.bps/1024))
+					if slowRejects >= openvpnSpeedRetries {
+						opts.openvpnAcceptSlow = true
+						stageMsg(fmt.Sprintf("[%s] 已连续 %d 个中继偏慢，后续优先保持连接、不再因速度换节点", label, slowRejects))
+					}
+					continue
+				}
+			}
 			if serr == nil {
 				clearVPNGateFailure(node.id())
 				rememberLastGoodVPNGate(node)
@@ -1061,6 +1125,7 @@ func startAndVerify(ctx context.Context, opts options, ce cachedEndpoint, run pr
 	if c.Running() {
 		return clientState{}, fmt.Errorf("core already running - disconnect first")
 	}
+	stageMsg(fmt.Sprintf("[%s] 生成并写入 Clash 配置…", label))
 	if err := c.WriteConfig(configYAML); err != nil {
 		return clientState{}, err
 	}
@@ -1121,6 +1186,26 @@ func startAndVerify(ctx context.Context, opts options, ce cachedEndpoint, run pr
 		return clientState{}, fmt.Errorf("数据面验证失败: %w", perr)
 	}
 
+	// A relay that passed every data-plane check can still be unusable: the
+	// verification transfer also measured its throughput, and a VPN Gate relay
+	// under the floor makes every page crawl. Remember the measurement for the
+	// picker's ranking, then rotate — bounded by the loop, so a network where
+	// every relay is slow still ends connected instead of failing.
+	if opts.openvpnMode && opts.openvpnNode != nil && probe.MeasuredBps > 0 {
+		bps := probe.MeasuredBps
+		rememberVPNGateSpeed(opts.openvpnNode.id(), bps)
+		stageMsg(fmt.Sprintf("[%s] 出口实测速度 ≈ %d KB/s", label, bps/1024))
+		// A pinned relay is the user's choice: report its speed, never rotate
+		// away from it on speed alone.
+		if opts.openvpnSpeedGate && opts.openvpnNodePin == "" && bps < openvpnMinBps {
+			if !opts.openvpnAcceptSlow {
+				_ = c.Stop()
+				return clientState{}, &slowRelayError{bps: bps}
+			}
+			stageMsg(fmt.Sprintf("[%s] 出口偏慢（低于 %d KB/s），但已无更快的候选，保留当前连接", label, openvpnMinBps/1024))
+		}
+	}
+
 	// The user-facing protocol: a dialer-proxy chain is WARP-in-WARP or MASQUE
 	// in MASQUE, not the carrier it happens to be rendered as.
 	protoName := run.name
@@ -1147,6 +1232,7 @@ func startAndVerify(ctx context.Context, opts options, ce cachedEndpoint, run pr
 		NoProxy:   opts.noProxy,
 		StartedAt: time.Now().Format(time.RFC3339),
 	}
+	state.MeasuredBps = probe.MeasuredBps
 	// The exit descriptor travels in state: health repair rebuilds the session
 	// from state.json alone, and without the relay it would silently drop the
 	// OpenVPN exit and reconnect to the bare underlay.

@@ -322,9 +322,7 @@ func (u *natUI) diagHeader() string {
 func (u *natUI) diagText() string {
 	var b strings.Builder
 	b.WriteString(u.diagHeader())
-	for _, l := range u.m.logs {
-		b.WriteString("log " + l.at.Format("15:04:05") + " " + l.text + "\r\n")
-	}
+	b.WriteString(u.logText())
 	return b.String()
 }
 

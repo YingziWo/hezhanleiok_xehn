@@ -121,6 +121,15 @@ type options struct {
 	// it only decides which node is tried first.
 	openvpnNodePin string
 	openvpnNode    *vpnGateNode
+	// openvpnSpeedGate enables the connect-time speed floor: a working relay
+	// whose measured throughput is below the floor is rotated out. The health
+	// repair leaves it off — a repair must restore the session, not shop for a
+	// faster relay — while every interactive connect turns it on.
+	openvpnSpeedGate bool
+	// openvpnAcceptSlow is set by the connect loop once the speed-retry budget
+	// is spent, so the next working relay is kept even if it is still slow:
+	// slow beats nothing.
+	openvpnAcceptSlow bool
 
 	// coreLog, set by the GUIs, receives a copy of the core process's
 	// stdout/stderr for the log panel. Never a flag.

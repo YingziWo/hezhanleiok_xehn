@@ -298,8 +298,17 @@ func mihomoSocksProxy(port int) []kv {
 // mihomoOpenVPNProxy renders one VPN Gate relay as a native openvpn outbound.
 // The PEM blocks are `quoted`, which both YAML and JSON turn into a single
 // escaped line — a raw multi-line string would fork the YAML document.
-func mihomoOpenVPNProxy(p ovpnProfile) []kv {
+// capMTU is the nested budget (outer tunnel MTU minus encapsulation). mihomo
+// defaults the openvpn tunnel MTU to 1500, and a VPN Gate profile carries no
+// MTU line, so a UDP relay would otherwise write 1500-byte datagrams into a
+// 1280-ish base tunnel: every full-size packet fragments, and one lost fragment
+// costs the whole packet. TCP relays carry the same packets as a byte stream
+// (the base stack segments them), so they keep the default.
+func mihomoOpenVPNProxy(p ovpnProfile, capMTU int) []kv {
 	p = normalizeOVPNProfile(p)
+	if p.Proto == "udp" && capMTU > 0 && (p.MTU <= 0 || p.MTU > capMTU) {
+		p.MTU = capMTU
+	}
 	out := []kv{
 		{k: "name", v: quoted(mihomoOpenVPNName)},
 		{k: "type", v: "openvpn"},

@@ -11,4 +11,6 @@ const (
 
 var scanSpinner = spinner.Dot
 
+func attachParentConsole() {}
+
 func enableVirtualTerminal() {}

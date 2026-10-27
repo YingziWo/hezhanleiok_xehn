@@ -28,7 +28,7 @@ with an embedded Clash (mihomo) core for actual traffic routing.
 
 ```powershell
 # 1. unzip anywhere writable
-# 2. double-click warp-client-gui.exe  →  native window opens (Proton style)
+# 2. double-click warp-client.exe  →  native window opens (Proton style)
 # 3. click 连接 — first run auto-registers a WARP account + scans
 ```
 
@@ -36,8 +36,8 @@ ZIP layout (`pack.ps1` assembles it):
 
 ```
 warp-client\
-├── warp-client-gui.exe   ← double-click; no console window (-H windowsgui)
-├── warp-client.exe       ← same binary, console build, for CLI use
+├── warp-client.exe       ← the only program file: double-click opens the GUI;
+│                           arguments run the CLI in the calling terminal
 ├── core\
 │   ├── mihomo.exe        ← the Clash core — replace this file to update it
 │   ├── psiphon.exe       ← optional: Psiphon exit sidecar (GPL-3.0)
@@ -46,7 +46,13 @@ warp-client\
 └── README.txt
 ```
 
-The GUI binary auto-anchors `WARP_CLIENT_HOME` to its own folder (portable
+The ZIP is assembled from a fresh staging tree and never contains
+`warpscout-account.json`, state, settings, caches or logs: a new device has no
+credentials, so its first connect/scan registers a new WARP account there. Do
+not copy an old `warpscout-account.json` along with the program unless you
+intend to reuse that device identity.
+
+The executable auto-anchors `WARP_CLIENT_HOME` to its own folder (portable
 mode), so account, cache, state, config and logs all stay next to the exe —
 delete the folder and everything is gone.
 
@@ -61,7 +67,7 @@ The GUI never embeds mihomo; it manages `core\mihomo.exe` as a plain file:
 
 ### The GUI
 
-`warp-client.exe gui` (or a bare double-click of the windowsgui build) opens a
+`warp-client.exe gui` (or a bare double-click) opens a
 **native Windows window** — self-drawn on [`lxn/walk`](https://github.com/lxn/walk)
 (a single `CustomWidgetPixels` canvas; no browser, no webview, no runtime UI
 dependency). The layout is a 1080x700 grid scaled by the display DPI, so it
@@ -161,13 +167,10 @@ $env:GOCACHE='E:\xiaohe\xhwarp\.gocache'
 $env:GOPATH='E:\xiaohe\xhwarp\.gopath'
 $env:GOPROXY='https://goproxy.cn,direct'
 
-# console / CLI build
-go build -trimpath -ldflags "-s -w -X main.version=0.3.0" -o warp-client.exe .
+# one program file: double-click opens the GUI, arguments run the CLI
+go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=0.3.0 -X main.windowsGUIBuild=1" -o warp-client.exe .
 
-# double-click GUI build (identical binary, no console window)
-go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=0.3.0" -o warp-client-gui.exe .
-
-# everything above + the portable ZIP in dist\:
+# everything above + the portable ZIP in dist\ (the supported release path):
 powershell -ExecutionPolicy Bypass -File .\pack.ps1 [-MihomoPath <mihomo.exe>] [-PsiphonExePath <psiphon.exe>] [-PsiphonConfigPath <client.config>]
 ```
 
@@ -176,16 +179,21 @@ The native window links a Win32 manifest (comctl32 v6) embedded into
 `TTM_ADDTOOL failed`. `pack.ps1` regenerates the `.syso` from `app.manifest`
 using `akavel/rsrc` (install once with `go install github.com/akavel/rsrc@latest`).
 
-`-H windowsgui` only strips the console subsystem flag — no code changes. With
-no console attached the GUI redirects all output (its own and the mihomo
-core's) to `warp-client.log` next to the exe.
+`-H windowsgui` strips the console subsystem flag, so a double-click never
+flashes a terminal window. The same binary still serves the CLI: with a
+subcommand it attaches to the caller's console and reopens its standard
+streams. With no console attached the GUI redirects all output (its own and the
+mihomo core's) to `warp-client.log` next to the exe. Because Windows does not
+wait for a GUI-subsystem process, `cmd` returns to its prompt immediately while
+register/connect keep running in the background; their output stays attached to
+that terminal.
 
 ## Usage
 
 ```powershell
 # 0. no arguments at all → the native GUI window (double-click equivalent)
-warp-client-gui.exe
-warp-client gui          # force the native window
+warp-client.exe
+warp-client.exe gui      # force the native window
 
 # 1. register a WARP account
 warp-client register

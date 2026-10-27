@@ -5,20 +5,23 @@
 #
 # Layout produced in dist\:
 #   warp-client\
-#   ├── warp-client-gui.exe   ← double-click to start (no console window)
-#   ├── warp-client.exe       ← same binary, console build, for CLI use
+#   ├── warp-client.exe   ← the only program file: double-click opens the GUI;
+#   │                       arguments run the CLI in the calling terminal
 #   ├── core\
-#   │   ├── mihomo.exe        ← the Clash core, updatable independently
-#   │   ├── psiphon.exe       ← optional: the Psiphon exit sidecar (GPL-3.0)
-#   │   ├── client.config     ← optional: official Psiphon credentials (needed with psiphon.exe)
-#   │   └── server_list.dat   ← optional: initial Psiphon server list
+#   │   ├── mihomo.exe    ← the Clash core, updatable independently
+#   │   ├── psiphon.exe   ← optional: the Psiphon exit sidecar (GPL-3.0)
+#   │   ├── client.config ← optional: official Psiphon credentials (needed with psiphon.exe)
+#   │   └── server_list.dat ← optional: initial Psiphon server list
 #   ├── licenses\
-#   │   └── GPL-3.0.txt       ← license text for the bundled mihomo + Psiphon
+#   │   └── GPL-3.0.txt   ← license text for the bundled mihomo + Psiphon
 #   ├── THIRD_PARTY_NOTICES.md
 #   └── README.txt
 #
 # Everything else (account, scan cache, state, config.yaml, logs) is created at
-# runtime next to the exe thanks to portable-mode auto-anchoring.
+# runtime next to the exe thanks to portable-mode auto-anchoring. The staging
+# tree is verified below and packaging aborts if any account or runtime state
+# file sneaks in, so a fresh extraction starts with no credentials and its
+# first connect/scan registers a new WARP device for that machine.
 param(
     [string]$MihomoPath = "",
     [string]$PsiphonExePath = "",
@@ -30,9 +33,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $dist = Join-Path $here 'dist'
+$buildDir = Join-Path $dist 'build'
+$bin = Join-Path $buildDir 'warp-client.exe'
 $root = Join-Path $dist 'warp-client'
 $stamp = Get-Date -Format 'yyyyMMddHHmmss'
 if (-not $Version) { $Version = "0.3.0-$stamp" }
+
+New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
 
 if (-not $SkipBuild) {
     # Environment: keep Go caches inside the workspace when unset outside.
@@ -70,20 +77,33 @@ if (-not $SkipBuild) {
         Pop-Location; throw "rsrc_windows_amd64.syso missing AND rsrc.exe not installed — install via: go install github.com/akavel/rsrc@latest"
     }
 
-    go build -trimpath -ldflags "-s -w -X main.version=$Version" -o warp-client.exe .
-    if ($LASTEXITCODE -ne 0) { Pop-Location; throw "console build failed" }
-    go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$Version -X main.windowsGUIBuild=1" -o warp-client-gui.exe .
-    if ($LASTEXITCODE -ne 0) { Pop-Location; throw "windowsgui build failed" }
+    # ONE program file. The windowsgui subsystem keeps a double-click free of a
+    # console window; CLI subcommands dispatch through the same exe and attach
+    # to the caller's terminal at startup, so the old console twin is gone.
+    go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$Version -X main.windowsGUIBuild=1" -o $bin .
+    if ($LASTEXITCODE -ne 0) { Pop-Location; throw "single windowsgui build failed" }
+
     Pop-Location
-    Write-Host "built warp-client.exe + warp-client-gui.exe ($Version)"
+    Write-Host "built warp-client.exe ($Version)"
+} elseif (-not (Test-Path $bin)) {
+    throw "-SkipBuild given but $bin is missing; run pack.ps1 without -SkipBuild first"
 }
 
-# Fresh dist tree
+# Older packs wrote a second GUI-named exe into the source tree. Remove that
+# stale artifact so the layout cannot be mistaken for a two-program release.
+$legacyGUI = Join-Path $here 'warp-client-gui.exe'
+if (Test-Path $legacyGUI) {
+    Remove-Item $legacyGUI -Force -ErrorAction SilentlyContinue
+    if (Test-Path $legacyGUI) {
+        Write-Host 'note: warp-client-gui.exe is in use; close it and delete it manually'
+    }
+}
+
+# Fresh staging tree. Only files copied explicitly below can reach the ZIP.
 if (Test-Path $root) { Remove-Item $root -Recurse -Force }
 New-Item -ItemType Directory -Force -Path "$root\core" | Out-Null
 
-Copy-Item (Join-Path $here 'warp-client-gui.exe') $root
-Copy-Item (Join-Path $here 'warp-client.exe')     $root
+Copy-Item $bin (Join-Path $root 'warp-client.exe')
 
 # Core: bundled when provided, otherwise the GUI downloads it on first run.
 if ($MihomoPath -and (Test-Path $MihomoPath)) {
@@ -136,12 +156,60 @@ if (Test-Path $gpl) {
     Write-Host 'WARNING: third_party\GPL-3.0.txt missing — the ZIP bundles GPL-3.0 binaries and must ship the license'
 }
 
+# A release ZIP is handed to other people: it must not carry this machine's
+# WARP identity or runtime state. With no warpscout-account.json, ensureAccount()
+# registers a new device on the recipient's first connect/scan.
+$forbiddenNames = @(
+    'warpscout-account.json', 'state.json', 'settings.json', 'cache.json',
+    'config.yaml', 'cache.db', 'warp-client.log',
+    'vpngate-underlay.json', 'vpngate-failed.json', 'vpngate-last.json',
+    'vpngate-nodes.json', 'vpngate-nodes-v2.json'
+)
+$leaks = @(Get-ChildItem $root -Recurse -File | Where-Object {
+    ($forbiddenNames -contains $_.Name) -or
+    ($_.Name -like 'vpngate-*.json') -or
+    ($_.Name -like 'warp-report-*.txt')
+})
+if ($leaks.Count -gt 0) {
+    $names = ($leaks | ForEach-Object { $_.FullName.Substring($root.Length + 1) }) -join ', '
+    throw "refusing to package credentials/runtime state: $names"
+}
+
+$topExes = @(Get-ChildItem $root -File -Filter *.exe)
+if ($topExes.Count -ne 1 -or $topExes[0].Name -ne 'warp-client.exe') {
+    throw "release must expose exactly one top-level program: warp-client.exe"
+}
+
 # Zip it
 $zip = Join-Path $dist "warp-client-$Version.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path $root -DestinationPath $zip -CompressionLevel Optimal
+
+# Verify the archive itself, not only the staging tree: this is the artifact
+# that leaves the machine.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+try {
+    $entries = @($archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
+} finally {
+    $archive.Dispose()
+}
+$leakedEntries = @($entries | Where-Object {
+    $_ -match '(^|/)(warpscout-account\.json|state\.json|settings\.json|cache\.json|config\.yaml|cache\.db|warp-client\.log)$' -or
+    $_ -match '(^|/)vpngate-.*\.json$' -or
+    $_ -match '(^|/)warp-report-.*\.txt$'
+})
+if ($leakedEntries.Count -gt 0) {
+    throw "archive contains credentials/runtime state: $($leakedEntries -join ', ')"
+}
+$zipExes = @($entries | Where-Object { $_ -match '^warp-client/[^/]+\.exe$' })
+if ($zipExes.Count -ne 1) {
+    throw "archive must contain exactly one top-level program, found: $($zipExes -join ', ')"
+}
+
 Write-Host ""
 Write-Host "ZIP ready: $zip ($([math]::Round((Get-Item $zip).Length/1MB,1)) MB)"
+Write-Host "One program: warp-client.exe (no account data in the archive)"
 Write-Host "Layout:"
 Get-ChildItem $root -Recurse -File | ForEach-Object {
     Write-Host ("  " + $_.FullName.Substring($root.Length + 1) + "  ($([math]::Round($_.Length/1MB,2)) MB)")

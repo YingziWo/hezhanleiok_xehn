@@ -89,14 +89,30 @@ func (u *natUI) paintRunLog(c *walk.Canvas, x, y, w float64) {
 	if rows < 1 {
 		rows = 1
 	}
-	lines := u.m.logs
-	if len(lines) > rows {
-		lines = lines[len(lines)-rows:]
+	u.m.logVisibleRows = rows
+	all := u.m.logs
+	maxScroll := len(all) - rows
+	if maxScroll < 0 {
+		maxScroll = 0
 	}
-	if len(lines) == 0 {
+	// logScroll counts lines up from the newest, so 0 keeps following live
+	// output; the clamp also handles a resize that fits more rows.
+	if u.m.logScroll < 0 {
+		u.m.logScroll = 0
+	}
+	if u.m.logScroll > maxScroll {
+		u.m.logScroll = maxScroll
+	}
+	if len(all) == 0 {
 		u.textC(c, tr("暂无日志"), u.f.f9, th.faint, u.r(x+16, y+h/2-20, w-32, 20))
 		return
 	}
+	end := len(all) - u.m.logScroll
+	start := end - rows
+	if start < 0 {
+		start = 0
+	}
+	lines := all[start:end]
 	ly := y + 14
 	for _, l := range lines {
 		// Core chatter stays identifiable by its tag instead of being faded out:
@@ -116,6 +132,27 @@ func (u *natUI) paintRunLog(c *walk.Canvas, x, y, w float64) {
 		u.txt(c, x+144, ly, w-160, lineH, l.text, u.f.fmono, msgCol)
 		ly += lineH
 	}
+	u.paintLogScrollbar(c, x, y, w, h, maxScroll)
+}
+
+// paintLogScrollbar mirrors the settings column's slim indicator: shown only
+// when history spills past one screen, thumb at the bottom while following.
+func (u *natUI) paintLogScrollbar(c *walk.Canvas, x, y, w, h float64, maxScroll int) {
+	if maxScroll <= 0 {
+		return
+	}
+	trackX := x + w - 10
+	top := y + 8
+	trackH := h - 16
+	u.fillRound(c, mix(th.line, th.card, 0.45), u.r(trackX, top, 4, trackH), 2)
+	total := float64(len(u.m.logs))
+	thumbH := trackH * float64(u.m.logVisibleRows) / total
+	if thumbH < 42 {
+		thumbH = 42
+	}
+	off := float64(maxScroll-u.m.logScroll) / float64(maxScroll)
+	thumbY := top + off*(trackH-thumbH)
+	u.fillRound(c, mix(th.accent, th.card, 0.28), u.r(trackX, thumbY, 4, thumbH), 2)
 }
 
 // paintSessions shows only the connection pipeline's own lines: the connect
