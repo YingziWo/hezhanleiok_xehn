@@ -277,6 +277,7 @@ var enStrings = map[string]string{
 	"正在检查…":       "Checking…",
 	"检查失败：发布页不可达（网络受限或 GitHub 被拦截）": "Check failed: releases unreachable (network restricted or GitHub blocked)",
 	"发现新版本，可到发布页下载":                 "A newer version is available on the releases page",
+	"发布页还没有 Release，可到项目主页查看进度": "No release has been published yet; check the project page for progress",
 	"已是最新版本": "Up to date",
 	"已就绪":    "Ready",
 	"未安装":    "Not installed",

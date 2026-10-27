@@ -431,15 +431,22 @@ func (u *natUI) actionUpdate(id string) {
 		go func() {
 			// fetchLatestVersion, not latestVersion: a manual check must not be
 			// answered from the 6h cache, or the button would lie.
-			latest := fetchLatestVersion(u.ctx)
+			latest, answered := fetchLatestVersion(u.ctx)
 			u.sync(func() {
 				u.m.updBusy = false
 				u.m.updChecked = true
 				u.m.updTime = time.Now()
-				if latest == "" {
+				switch {
+				case !answered:
 					u.m.updLatest = ""
 					u.m.updNote = tr("检查失败：发布页不可达（网络受限或 GitHub 被拦截）")
-				} else {
+				case latest == "":
+					// The repository answered and has no releases yet: saying
+					// "unreachable" here would blame the network for a version
+					// that simply does not exist.
+					u.m.updLatest = ""
+					u.m.updNote = tr("发布页还没有 Release，可到项目主页查看进度")
+				default:
 					u.m.updLatest = latest
 					if newerVersion(latest, resolveVersion()) {
 						u.m.updNote = tr("发现新版本，可到发布页下载")

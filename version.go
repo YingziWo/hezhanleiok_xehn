@@ -87,7 +87,7 @@ func latestVersion(ctx context.Context) string {
 	if v, ok := readVersionCache(path, updateCacheTTL); ok {
 		return v
 	}
-	v := fetchLatestVersion(ctx)
+	v, _ := fetchLatestVersion(ctx)
 	// Cached even when the fetch failed: on a network where GitHub is blocked
 	// every run would otherwise pay the timeout.
 	writeVersionCache(path, v)
@@ -123,30 +123,39 @@ func writeVersionCache(path, version string) {
 	os.WriteFile(path, []byte(version+"\n"), 0644)
 }
 
-func fetchLatestVersion(ctx context.Context) string {
+// fetchLatestVersion returns the newest release tag and whether the answer came
+// from GitHub at all. The two are separate because "no release has been
+// published yet" (a 404 on a repository that exists) and "GitHub is
+// unreachable" are different facts, and the update card must not report the
+// first one as the second.
+func fetchLatestVersion(ctx context.Context) (version string, answered bool) {
 	ctx, cancel := context.WithTimeout(ctx, updateCheckTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ghLatestURL, nil)
 	if err != nil {
-		return ""
+		return "", false
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return ""
+		return "", false
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		// The repository answered: it simply has no releases yet.
+		return "", true
+	}
 	if resp.StatusCode != http.StatusOK {
-		return ""
+		return "", false
 	}
 	var r struct {
 		Tag string `json:"tag_name"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&r) != nil {
-		return ""
+		return "", true
 	}
-	return strings.TrimPrefix(r.Tag, "v")
+	return strings.TrimPrefix(r.Tag, "v"), true
 }
 
 func newerVersion(latest, current string) bool {
