@@ -14,7 +14,7 @@
 【快速开始】
 
   1. 解压到任意可写目录
-  2. 双击 warp-client.exe
+  2. 双击 xehn.exe
      → 弹出原生图形窗口(深色 Proton 风格,非网页)
      → 首次点击「连接」会自动注册本设备的 WARP 账号 + 扫描最优端点
   3. 窗口内即可看到:出口 IP、国家、延迟、Colo 节点,以及实时延迟图表
@@ -34,11 +34,11 @@
      点击某行即可锁定该端点(固定连接)
   · 底栏「核心」:未安装时可一键下载 Clash 核心
 
-  TUN 全局模式:右键 warp-client.exe → 以管理员身份运行
+  TUN 全局模式:右键 xehn.exe → 以管理员身份运行
 
 【目录说明】
 
-  warp-client.exe       唯一的程序文件:双击启动原生图形窗口;
+  xehn.exe       唯一的程序文件:双击启动原生图形窗口;
                         带子命令运行时作为命令行工具(输出到当前终端)
   core\
     mihomo.exe          Clash 核心 — 独立文件,可单独替换更新
@@ -54,7 +54,7 @@
     cache.json               扫描结果缓存(6 小时有效)
     state.json               连接状态
     core\config.yaml         mihomo 配置
-    warp-client.log          日志
+    xehn.log          日志
 
 【分发到新设备】
 
@@ -72,26 +72,26 @@
 
 【命令行用法】
 
-  与 GUI 是同一个 warp-client.exe,在终端带子命令运行即可。
+  与 GUI 是同一个 xehn.exe,在终端带子命令运行即可。
   注意:该 exe 为窗口子系统,cmd 不会等待命令结束(提示符会先返回);
   注册/连接仍在后台继续,输出显示在当前终端。
 
-  warp-client.exe register              注册 WARP 账号
-  warp-client.exe connect -p awg        连接(awg/wg/masque/masque-h2)
-  warp-client.exe connect -p awg --psiphon
+  xehn.exe register              注册 WARP 账号
+  xehn.exe connect -p awg        连接(awg/wg/masque/masque-h2)
+  xehn.exe connect -p awg --psiphon
                                         基础协议 + Psiphon 出口(最终出口 IP 变为 Psiphon 的)
-  warp-client.exe connect --tun         TUN 全局模式(需管理员)
-  warp-client.exe status                查看出口 IP/延迟/国家
-  warp-client.exe list                  查看缓存的端点
-  warp-client.exe disconnect            断开并还原系统代理
-  warp-client.exe gui                   启动原生图形窗口
-  warp-client.exe gui --web             旧网页面板(浏览器模式)
-  warp-client.exe scan -best -p awg     只扫描输出最优端点
+  xehn.exe connect --tun         TUN 全局模式(需管理员)
+  xehn.exe status                查看出口 IP/延迟/国家
+  xehn.exe list                  查看缓存的端点
+  xehn.exe disconnect            断开并还原系统代理
+  xehn.exe gui                   启动原生图形窗口
+  xehn.exe gui --web             旧网页面板(浏览器模式)
+  xehn.exe scan -best -p awg     只扫描输出最优端点
 
 【常见问题】
 
   Q: 连接后没网?
-  A: 检查 warp-client.log;先 disconnect 再重连;或换协议
+  A: 检查 xehn.log;先 disconnect 再重连;或换协议
      (AWG 抗封锁能力最强,推荐优先使用)
 
   Q: 想完全重置?
@@ -99,7 +99,7 @@
 
   Q: Psiphon 出口怎么用?
   A: 把官方 psiphon.exe 与 client.config 放进 core\ ,然后
-     warp-client.exe connect -p awg --psiphon
+     xehn.exe connect -p awg --psiphon
      基础协议(WG/AWG/MASQUE)负责内层承载,最终公网出口 IP 变为 Psiphon 的;
      status 会显示组合态,如 session=AWG-Psiphon。
      也可用环境变量指定路径:PSIPHON_EXE、PSIPHON_CONFIG。

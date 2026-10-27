@@ -20,7 +20,7 @@ import (
 // could not reach.
 //
 // It never touches the network and never shows a window: it is spawned with
-// CREATE_NO_WINDOW / no console at all, and logs into warp-client.log like
+// CREATE_NO_WINDOW / no console at all, and logs into xehn.log like
 // the GUI it guards.
 func runWatchdogCmd(args []string) int {
 	fs := flag.NewFlagSet("watchdog", flag.ContinueOnError)
@@ -32,11 +32,11 @@ func runWatchdogCmd(args []string) int {
 		return 2
 	}
 
-	// The client this watchdog guards logs to warp-client.log; the watchdog's
+	// The client this watchdog guards logs to xehn.log; the watchdog's
 	// own console is hidden or absent, so it appends there too — the cleanup
 	// trace must be readable after the fact.
 	if home, err := appDir(); err == nil {
-		if f, ferr := os.OpenFile(filepath.Join(home, "warp-client.log"),
+		if f, ferr := os.OpenFile(filepath.Join(home, "xehn.log"),
 			os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); ferr == nil {
 			defer f.Close()
 			log.SetOutput(f)

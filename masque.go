@@ -417,7 +417,7 @@ var muteLibLog sync.Once
 func newMasqueTunnel(h2 bool) (*masqueTunnel, error) {
 	muteLibLog.Do(func() { log.SetOutput(io.Discard) })
 	if masqueAcct == nil {
-		return nil, fmt.Errorf("no MASQUE device in the account file: run \"warp-client register\" again")
+		return nil, fmt.Errorf("no MASQUE device in the account file: run \"xehn register\" again")
 	}
 	tlsCfg, err := masqueAcct.tlsConfig()
 	if err != nil {

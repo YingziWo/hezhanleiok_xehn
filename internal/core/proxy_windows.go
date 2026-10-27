@@ -119,7 +119,7 @@ func SetSystemProxy(port int) (*ProxySnapshot, error) {
 
 	server := fmt.Sprintf("127.0.0.1:%d", port)
 	// If the proxy already points at our mixed port, the captured "current"
-	// values are a previous warp-client connect's leftovers (crash mid-connect,
+	// values are a previous xehn connect's leftovers (crash mid-connect,
 	// or connect while connected), not the user's baseline. Restoring them on
 	// disconnect would leave the proxy enabled against a dead port; snapshot a
 	// clean no-proxy baseline instead.

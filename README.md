@@ -1,4 +1,4 @@
-# warp-client
+# XEHN
 
 A Windows client for Cloudflare WARP that scans for the best endpoint and
 connects through it in one click — built on top of
@@ -7,7 +7,7 @@ with an embedded Clash (mihomo) core for actual traffic routing.
 
 **Download:** [latest release](https://github.com/hezhanleiok/xehn/releases/latest)
 — unzip the portable package anywhere writable and double-click
-`warp-client.exe`. The package carries no account: the first connect registers
+`xehn.exe`. The package carries no account: the first connect registers
 a fresh WARP device for that machine.
 
 ## What it does
@@ -34,15 +34,15 @@ a fresh WARP device for that machine.
 
 ```powershell
 # 1. unzip anywhere writable
-# 2. double-click warp-client.exe  →  native window opens (Proton style)
+# 2. double-click xehn.exe  →  native window opens (Proton style)
 # 3. click 连接 — first run auto-registers a WARP account + scans
 ```
 
 ZIP layout (`pack.ps1` assembles it):
 
 ```
-warp-client\
-├── warp-client.exe       ← the only program file: double-click opens the GUI;
+XEHN\
+├── xehn.exe             ← the only program file: double-click opens the GUI;
 │                           arguments run the CLI in the calling terminal
 ├── core\
 │   ├── mihomo.exe        ← the Clash core — replace this file to update it
@@ -69,11 +69,11 @@ The GUI never embeds mihomo; it manages `core\mihomo.exe` as a plain file:
 - **One click**: dashboard → 「更新核心」 downloads the latest
   `mihomo-windows-amd64` release.
 - **Manual**: drop any mihomo build into `core\mihomo.exe` — no rebuild, no
-  version lock. `warp-client.exe` also accepts `-core PATH` to point elsewhere.
+  version lock. `xehn.exe` also accepts `-core PATH` to point elsewhere.
 
 ### The GUI
 
-`warp-client.exe gui` (or a bare double-click) opens a
+`xehn.exe gui` (or a bare double-click) opens a
 **native Windows window** — self-drawn on [`lxn/walk`](https://github.com/lxn/walk)
 (a single `CustomWidgetPixels` canvas; no browser, no webview, no runtime UI
 dependency). The layout is a 1080x700 grid scaled by the display DPI, so it
@@ -171,7 +171,7 @@ so a restart cannot quietly put a stopped client back into service.
 ## Architecture
 
 ```
-warp-client (package main)            the warpscout engine (verbatim) +
+xehn (package main)            the warpscout engine (verbatim) +
                                      the client orchestration layer
 ├── cli.go / flags.go                command registry + flag wiring
 ├── main.go                          scan command (warpscout)
@@ -234,7 +234,7 @@ $env:GOPATH='E:\xiaohe\xhwarp\.gopath'
 $env:GOPROXY='https://goproxy.cn,direct'
 
 # one program file: double-click opens the GUI, arguments run the CLI
-go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=0.3.0 -X main.windowsGUIBuild=1" -o warp-client.exe .
+go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=1.0 -X main.windowsGUIBuild=1" -o xehn.exe .
 
 # everything above + the portable ZIP in dist\ (the supported release path):
 powershell -ExecutionPolicy Bypass -File .\pack.ps1 [-MihomoPath <mihomo.exe>] [-PsiphonExePath <psiphon.exe>] [-PsiphonConfigPath <client.config>]
@@ -249,7 +249,7 @@ using `akavel/rsrc` (install once with `go install github.com/akavel/rsrc@latest
 flashes a terminal window. The same binary still serves the CLI: with a
 subcommand it attaches to the caller's console and reopens its standard
 streams. With no console attached the GUI redirects all output (its own and the
-mihomo core's) to `warp-client.log` next to the exe. Because Windows does not
+mihomo core's) to `xehn.log` next to the exe. Because Windows does not
 wait for a GUI-subsystem process, `cmd` returns to its prompt immediately while
 register/connect keep running in the background; their output stays attached to
 that terminal.
@@ -258,45 +258,45 @@ that terminal.
 
 ```powershell
 # 0. no arguments at all → the native GUI window (double-click equivalent)
-warp-client.exe
-warp-client.exe gui      # force the native window
+xehn.exe
+xehn.exe gui      # force the native window
 
 # 1. register a WARP account
-warp-client register
+xehn register
 
 # 2. connect — scans (cached 6h), picks best endpoint, starts core, sets proxy
-warp-client connect -p awg
-warp-client connect -p wg
-warp-client connect -p masque
-warp-client connect -p masque-h2
-warp-client connect --tun            # TUN global mode (needs admin)
-warp-client connect --scan-now       # force re-scan, ignore cache
-warp-client connect -p awg --psiphon # base protocol + Psiphon exit (final IP = Psiphon)
+xehn connect -p awg
+xehn connect -p wg
+xehn connect -p masque
+xehn connect -p masque-h2
+xehn connect --tun            # TUN global mode (needs admin)
+xehn connect --scan-now       # force re-scan, ignore cache
+xehn connect -p awg --psiphon # base protocol + Psiphon exit (final IP = Psiphon)
 
 # 3. show current exit IP / latency / country
-warp-client status
+xehn status
 
 # 4. list cached endpoints
-warp-client list
-warp-client list -p wg
+xehn list
+xehn list -p wg
 
 # 5. disconnect — stops core, restores prior system-proxy state
-warp-client disconnect
+xehn disconnect
 
 # raw engine commands (from warpscout) still work:
-warp-client scan -best -p awg
-warp-client scan -conf - -conf-type mihomo -p awg
+xehn scan -best -p awg
+xehn scan -conf - -conf-type mihomo -p awg
 ```
 
 ### Portable / custom home
 
 When `WARP_CLIENT_HOME` is unset, the client auto-anchors its home to the
 executable's folder (if writable — e.g. the extracted ZIP) and falls back to
-`%APPDATA%\warp-client` otherwise. Set the variable explicitly to pin it:
+`%APPDATA%\xehn` otherwise. Set the variable explicitly to pin it:
 
 ```powershell
 $env:WARP_CLIENT_HOME='D:\warp-portable'
-warp-client connect
+xehn connect
 ```
 
 ### Psiphon exit (V1)
@@ -322,8 +322,8 @@ The client config carries the `SponsorId` / `PropagationChannelId` /
 `server_list.dat` next to it is used as the initial server list.
 
 ```powershell
-warp-client connect -p awg --psiphon
-warp-client status            # session=AWG-Psiphon  endpoint=…  exit=<Psiphon exit IP>
+xehn connect -p awg --psiphon
+xehn status            # session=AWG-Psiphon  endpoint=…  exit=<Psiphon exit IP>
 ```
 
 `psiphon-tunnel-core` is **GPL-3.0**. It ships as a separate `psiphon.exe`

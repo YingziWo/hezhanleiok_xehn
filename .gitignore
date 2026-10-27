@@ -1,4 +1,5 @@
 # Build output (rebuilt by pack.ps1 / go build, never committed)
+xehn.exe
 warp-client.exe
 warp-client-gui.exe
 /dist/

@@ -25,7 +25,7 @@ const (
 
 func runSocksCmd(ctx context.Context, opts options) error {
 	if opts.endpoint == "" {
-		return fmt.Errorf("-endpoint ADDR is required: pass what \"warp-client scan -best\" prints")
+		return fmt.Errorf("-endpoint ADDR is required: pass what \"xehn scan -best\" prints")
 	}
 	if opts.port < 1 || opts.port > 65535 {
 		return fmt.Errorf("-port (%d) must be between 1 and 65535", opts.port)
@@ -49,7 +49,7 @@ func runSocksCmd(ctx context.Context, opts options) error {
 		return err
 	}
 	if run.isMASQUE() && masqueAcct == nil {
-		return fmt.Errorf("%s holds no MASQUE device: run \"warp-client register\" again", opts.accountPath)
+		return fmt.Errorf("%s holds no MASQUE device: run \"xehn register\" again", opts.accountPath)
 	}
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt)

@@ -31,7 +31,7 @@ var commands = []command{
 			"",
 			"Working endpoints are reported grouped per subnet. ENDPOINT PING is the ICMP",
 			"ping to the endpoint address; -tun-ping adds TUN PING, measured inside the tunnel.",
-			"Needs a WARP account: run \"warp-client register\" first.",
+			"Needs a WARP account: run \"xehn register\" first.",
 			"",
 			"-proto masque scans Cloudflare's MASQUE service instead: it has no endpoint",
 			"pools, so the run covers two anycast addresses on a fixed set of ports and",
@@ -113,7 +113,7 @@ var commands = []command{
 	},
 	{
 		name:  "version",
-		brief: "print the warp-client version",
+		brief: "print the xehn version",
 		intro: []string{"Prints the version alone, so a script can compare it as is."},
 		setup: func(*flag.FlagSet, *options) {},
 		run:   runVersionCmd,

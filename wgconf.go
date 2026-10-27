@@ -284,7 +284,7 @@ func renderProxiesYAML(proxies [][]kv) string {
 }
 
 // mihomoSocksProxy builds the Psiphon socks5 outbound node. Psiphon listens on
-// 127.0.0.1 at the fixed port warp-client picked before starting it (the port is
+// 127.0.0.1 at the fixed port xehn picked before starting it (the port is
 // fixed, not dynamic, so this config can be rendered before Psiphon is up).
 func mihomoSocksProxy(port int) []kv {
 	return []kv{

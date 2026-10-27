@@ -40,7 +40,7 @@ func redirectLogs() {
 	if err != nil {
 		return
 	}
-	logPath := filepath.Join(home, "warp-client.log")
+	logPath := filepath.Join(home, "xehn.log")
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return

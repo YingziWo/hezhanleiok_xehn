@@ -175,10 +175,13 @@ func newerVersion(latest, current string) bool {
 	return false
 }
 
+// parseSemver accepts "1", "1.0" and "1.0.0" alike: this client's releases are
+// numbered "XEHN 1.0" style, and requiring three parts would silently disable
+// the update notice for every build named that way.
 func parseSemver(v string) ([3]int, bool) {
 	var out [3]int
-	parts := strings.Split(strings.TrimPrefix(v, "v"), ".")
-	if len(parts) != len(out) {
+	parts := strings.Split(strings.TrimPrefix(strings.TrimSpace(v), "v"), ".")
+	if len(parts) == 0 || len(parts) > len(out) {
 		return out, false
 	}
 	for i, p := range parts {

@@ -921,7 +921,7 @@ func runHealthGuard(args []string) int {
 	// log every other headless part of the client uses - the whole point of
 	// watching the data plane is being able to read afterwards what it saw.
 	if home, herr := appDir(); herr == nil {
-		if f, ferr := os.OpenFile(filepath.Join(home, "warp-client.log"),
+		if f, ferr := os.OpenFile(filepath.Join(home, "xehn.log"),
 			os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); ferr == nil {
 			os.Stderr = f
 			log.SetOutput(f)

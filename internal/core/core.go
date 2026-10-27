@@ -188,7 +188,7 @@ func (c *Core) Start() error {
 		// stdout is not a console: hand the core a log file, never our own
 		// stdout. A child that inherited a pipe's write end keeps it open after
 		// this process exits, so the reader on the other side (a script, an IDE
-		// task, `warp-client connect | tee log`) blocks until the core dies —
+		// task, `xehn connect | tee log`) blocks until the core dies —
 		// a connect that "hangs" despite having succeeded.
 		defer f.Close()
 		cmd.Stdout = f

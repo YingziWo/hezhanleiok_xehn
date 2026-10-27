@@ -6,7 +6,7 @@
 //   - a multi-size Windows .ico (16/24/32/48/64/256, PNG-compressed frames) that
 //     rsrc embeds into the exe so Explorer shows it as the program icon.
 //
-// Usage (from the warp-client directory):
+// Usage (from the xehn directory):
 //
 //	go run ./tools/mklogo -src ../../logo.png -png assets/logo.png -ico logo.ico
 package main

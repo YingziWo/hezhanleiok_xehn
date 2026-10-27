@@ -384,7 +384,7 @@ func (u *natUI) diagHeader() string {
 	sp, _ := settingsPath()
 	cDir, _ := coreDir()
 	var b strings.Builder
-	b.WriteString(appName + " " + shortVersion() + "\r\n")
+	b.WriteString(productName + " " + shortVersion() + "\r\n")
 	b.WriteString("build: " + guiBuildKind() + "\r\n")
 	b.WriteString("lang/theme: " + u.m.set.Lang + " / " + u.m.set.Theme + "\r\n")
 	b.WriteString("data: " + dir + "\r\n")

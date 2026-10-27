@@ -437,7 +437,7 @@ func (u *natUI) paintAbout(c *walk.Canvas, x, y, w float64) {
 	// Row 1 — what this build is, and what it is built from.
 	cy := u.card(c, x, row1, half, aboutRow1H, tr("本程序"))
 	for _, kv := range [][2]string{
-		{tr("名称"), appName},
+		{tr("名称"), productName},
 		{tr("版本"), shortVersion()},
 		{tr("构建"), guiBuildKind()},
 		{tr("核心版本"), orEmpty(u.m.coreVersion, tr("未探测"))},

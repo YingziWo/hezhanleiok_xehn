@@ -630,7 +630,7 @@ func fetchVPNGateDirect(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "warp-client/"+shortVersion())
+	req.Header.Set("User-Agent", "xehn/"+shortVersion())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -653,7 +653,7 @@ func fetchVPNGateViaProxy(ctx context.Context, mixedPort int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "warp-client/"+shortVersion())
+	req.Header.Set("User-Agent", "xehn/"+shortVersion())
 	client := vpnGateProxyClient(mixedPort, vpnGateFetchTimeout)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -808,7 +808,7 @@ func fetchVPNGateOverStack(ctx context.Context, t tunnel) ([]byte, error) {
 		_ = tlsConn.SetDeadline(deadline)
 	}
 	req := "GET /api/iphone/ HTTP/1.1\r\nHost: " + vpnGateHost +
-		"\r\nUser-Agent: warp-client/" + shortVersion() +
+		"\r\nUser-Agent: xehn/" + shortVersion() +
 		"\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"
 	if _, err := io.WriteString(tlsConn, req); err != nil {
 		return nil, err

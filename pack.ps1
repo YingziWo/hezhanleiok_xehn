@@ -1,11 +1,11 @@
-# pack.ps1 — assemble the portable warp-client ZIP (v2rayN-style layout).
+# pack.ps1 — assemble the portable XEHN ZIP (v2rayN-style layout).
 #
 #   .\pack.ps1 [-MihomoPath <path>] [-PsiphonExePath <path>] [-PsiphonConfigPath <path>]
 #              [-Version <tag>] [-SkipBuild]
 #
 # Layout produced in dist\:
-#   warp-client\
-#   ├── warp-client.exe   ← the only program file: double-click opens the GUI;
+#   XEHN\
+#   ├── xehn.exe          ← the only program file: double-click opens the GUI;
 #   │                       arguments run the CLI in the calling terminal
 #   ├── core\
 #   │   ├── mihomo.exe    ← the Clash core, updatable independently
@@ -34,8 +34,8 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $dist = Join-Path $here 'dist'
 $buildDir = Join-Path $dist 'build'
-$bin = Join-Path $buildDir 'warp-client.exe'
-$root = Join-Path $dist 'warp-client'
+$bin = Join-Path $buildDir 'xehn.exe'
+$root = Join-Path $dist 'XEHN'
 $stamp = Get-Date -Format 'yyyyMMddHHmmss'
 if (-not $Version) { $Version = "0.3.0-$stamp" }
 
@@ -84,7 +84,7 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { Pop-Location; throw "single windowsgui build failed" }
 
     Pop-Location
-    Write-Host "built warp-client.exe ($Version)"
+    Write-Host "built xehn.exe ($Version)"
 } elseif (-not (Test-Path $bin)) {
     throw "-SkipBuild given but $bin is missing; run pack.ps1 without -SkipBuild first"
 }
@@ -106,7 +106,7 @@ if (Test-Path $acctFile) {
         $exeText = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($bin))
         foreach ($k in $localKeys) {
             if ($exeText.Contains($k)) {
-                throw "refusing to package: warp-client.exe embeds this machine's WARP credentials (a private key or token from warpscout-account.json was found in the binary)"
+                throw "refusing to package: xehn.exe embeds this machine's WARP credentials (a private key or token from warpscout-account.json was found in the binary)"
             }
         }
         Write-Host "verified: no local WARP credentials embedded in the exe"
@@ -127,7 +127,7 @@ if (Test-Path $legacyGUI) {
 if (Test-Path $root) { Remove-Item $root -Recurse -Force }
 New-Item -ItemType Directory -Force -Path "$root\core" | Out-Null
 
-Copy-Item $bin (Join-Path $root 'warp-client.exe')
+Copy-Item $bin (Join-Path $root 'xehn.exe')
 
 # Core: bundled when provided, otherwise the GUI downloads it on first run.
 if ($MihomoPath -and (Test-Path $MihomoPath)) {
@@ -185,7 +185,7 @@ if (Test-Path $gpl) {
 # registers a new device on the recipient's first connect/scan.
 $forbiddenNames = @(
     'warpscout-account.json', 'state.json', 'settings.json', 'cache.json',
-    'config.yaml', 'cache.db', 'warp-client.log',
+    'config.yaml', 'cache.db', 'xehn.log',
     'vpngate-underlay.json', 'vpngate-failed.json', 'vpngate-last.json',
     'vpngate-nodes.json', 'vpngate-nodes-v2.json'
 )
@@ -200,12 +200,12 @@ if ($leaks.Count -gt 0) {
 }
 
 $topExes = @(Get-ChildItem $root -File -Filter *.exe)
-if ($topExes.Count -ne 1 -or $topExes[0].Name -ne 'warp-client.exe') {
-    throw "release must expose exactly one top-level program: warp-client.exe"
+if ($topExes.Count -ne 1 -or $topExes[0].Name -ne 'xehn.exe') {
+    throw "release must expose exactly one top-level program: xehn.exe"
 }
 
 # Zip it
-$zip = Join-Path $dist "warp-client-$Version.zip"
+$zip = Join-Path $dist "XEHN.$Version.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path $root -DestinationPath $zip -CompressionLevel Optimal
 
@@ -219,21 +219,21 @@ try {
     $archive.Dispose()
 }
 $leakedEntries = @($entries | Where-Object {
-    $_ -match '(^|/)(warpscout-account\.json|state\.json|settings\.json|cache\.json|config\.yaml|cache\.db|warp-client\.log)$' -or
+    $_ -match '(^|/)(warpscout-account\.json|state\.json|settings\.json|cache\.json|config\.yaml|cache\.db|xehn\.log)$' -or
     $_ -match '(^|/)vpngate-.*\.json$' -or
     $_ -match '(^|/)warp-report-.*\.txt$'
 })
 if ($leakedEntries.Count -gt 0) {
     throw "archive contains credentials/runtime state: $($leakedEntries -join ', ')"
 }
-$zipExes = @($entries | Where-Object { $_ -match '^warp-client/[^/]+\.exe$' })
+$zipExes = @($entries | Where-Object { $_ -match '^XEHN/[^/]+\.exe$' })
 if ($zipExes.Count -ne 1) {
     throw "archive must contain exactly one top-level program, found: $($zipExes -join ', ')"
 }
 
 Write-Host ""
 Write-Host "ZIP ready: $zip ($([math]::Round((Get-Item $zip).Length/1MB,1)) MB)"
-Write-Host "One program: warp-client.exe (no account data in the archive)"
+Write-Host "One program: xehn.exe (no account data in the archive)"
 Write-Host "Layout:"
 Get-ChildItem $root -Recurse -File | ForEach-Object {
     Write-Host ("  " + $_.FullName.Substring($root.Length + 1) + "  ($([math]::Round($_.Length/1MB,2)) MB)")

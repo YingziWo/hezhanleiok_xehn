@@ -52,13 +52,13 @@ type Options struct {
 }
 
 // DefaultPath returns the cache file path under the OS config dir, e.g.
-// %APPDATA%\warp-client\cache.json on Windows.
+// %APPDATA%\xehn\cache.json on Windows.
 func DefaultPath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "warp-client", "cache.json"), nil
+	return filepath.Join(dir, "xehn", "cache.json"), nil
 }
 
 // Open loads an existing cache file if present, otherwise returns an empty
