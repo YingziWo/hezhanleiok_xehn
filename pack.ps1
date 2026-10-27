@@ -89,6 +89,30 @@ if (-not $SkipBuild) {
     throw "-SkipBuild given but $bin is missing; run pack.ps1 without -SkipBuild first"
 }
 
+# A release must not carry this machine's WARP identity. Excluding the account
+# file is not enough: a stray go:embed or a pasted constant would put the
+# private key inside the binary, where no file-level check would ever see it.
+# Only secret fields are checked. peer_public_key is deliberately not: it is
+# Cloudflare's public peer key (the same constant warp.go compiles in), so
+# finding it proves nothing.
+$acctFile = Join-Path $here 'warpscout-account.json'
+if (Test-Path $acctFile) {
+    $acct = Get-Content $acctFile -Raw | ConvertFrom-Json
+    $localKeys = @($acct.private_key, $acct.token)
+    if ($acct.outer) { $localKeys += @($acct.outer.private_key, $acct.outer.token) }
+    if ($acct.masque) { $localKeys += @($acct.masque.private_key, $acct.masque.token) }
+    $localKeys = @($localKeys | Where-Object { $_ -and $_.Length -ge 16 })
+    if ($localKeys.Count -gt 0) {
+        $exeText = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($bin))
+        foreach ($k in $localKeys) {
+            if ($exeText.Contains($k)) {
+                throw "refusing to package: warp-client.exe embeds this machine's WARP credentials (a private key or token from warpscout-account.json was found in the binary)"
+            }
+        }
+        Write-Host "verified: no local WARP credentials embedded in the exe"
+    }
+}
+
 # Older packs wrote a second GUI-named exe into the source tree. Remove that
 # stale artifact so the layout cannot be mistaken for a two-program release.
 $legacyGUI = Join-Path $here 'warp-client-gui.exe'
