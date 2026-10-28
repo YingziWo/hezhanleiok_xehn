@@ -30,10 +30,18 @@ func TestRenderRoutingPresets(t *testing.T) {
 		notWant []string
 	}{
 		{
-			name:    "global",
-			mode:    modeGlobal,
-			want:    []string{"mode: rule", "  - MATCH,WARP"},
-			notWant: []string{"DOMAIN-SUFFIX", "GEOSITE"},
+			name: "global",
+			mode: modeGlobal,
+			// Global ignores the user's domain lists, but the LAN still stays
+			// local and QUIC is dropped: a UDP flow cannot be matched by domain
+			// and would slip past the system proxy entirely.
+			want: []string{
+				"mode: rule",
+				"  - MATCH,WARP",
+				"IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
+				"AND,(AND,(DST-PORT,443),(NETWORK,UDP)),REJECT",
+			},
+			notWant: []string{"GEOSITE", "DOMAIN-SUFFIX,example.com"},
 		},
 		{
 			name:    "direct",
@@ -298,6 +306,15 @@ func TestRenderBypassSplitsDNS(t *testing.T) {
 		"IP-CIDR,1.1.1.1/32,WARP",            // foreign resolver still follows it
 		`"geosite:cn": 223.5.5.5`,            // CN domains resolved domestically
 		`"geosite:geolocation-!cn": 1.1.1.1`, // foreign domains resolved abroad
+		// The whitelist v2rayN ships, ported: QUIC dropped everywhere but CN,
+		// Google always proxied, the CN DNS endpoints reached directly.
+		"AND,(AND,(DST-PORT,443),(NETWORK,UDP)),(NOT,((GEOSITE,cn))),REJECT",
+		"GEOSITE,google,WARP",
+		"DOMAIN-SUFFIX,alidns.com,DIRECT",
+		// LAN stays local — without this a router page or a NAS is routed
+		// through the exit and simply does not answer.
+		"IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
+		"IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
 	} {
 		if !strings.Contains(cfg, want) {
 			t.Errorf("bypass config missing %q\n%s", want, cfg)

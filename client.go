@@ -595,16 +595,64 @@ func dnsLeakProtected(o options) bool {
 // routeRules renders the rules the selected preset describes. The order is
 // DNS-server routes, proxy domains, direct domains, then the region split;
 // blacklisted-only mode is the one preset whose fallback is DIRECT.
+// quicBlockRule drops QUIC (HTTP/3) for everything that is not a mainland
+// destination. A UDP flow cannot be matched by domain, so HTTP/3 either slips
+// past the rule set or performs badly over the tunnel; the CN exclusion keeps
+// HTTP/3 working for the sites where it is actually an improvement (Bilibili
+// and friends). This is the rule the community configs ship, and v2rayN blocks
+// udp/443 in every preset.
+const quicBlockRule = "AND,(AND,(DST-PORT,443),(NETWORK,UDP)),(NOT,((GEOSITE,cn))),REJECT"
+
+// quicBlockRuleAll is the version without the CN exclusion, for global mode:
+// there is no geo rule set to ask, and everything not local belongs in the
+// tunnel anyway.
+const quicBlockRuleAll = "AND,(AND,(DST-PORT,443),(NETWORK,UDP)),REJECT"
+
+// privateRules keep the LAN local. A router page, a NAS or a printer does not
+// exist at the exit, and routing them through it is the difference between
+// "works" and "works until you open 192.168.1.1". Explicit CIDRs rather than
+// GEOIP,private: no dependency on a database, and the list is short enough to
+// read.
+func privateRules() []string {
+	return []string{
+		"IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
+		"IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",
+		"IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
+		"IP-CIDR,100.64.0.0/10,DIRECT,no-resolve",
+		"IP-CIDR,127.0.0.0/8,DIRECT,no-resolve",
+		"IP-CIDR6,fc00::/7,DIRECT,no-resolve",
+		"IP-CIDR6,fe80::/10,DIRECT,no-resolve",
+		"DOMAIN-SUFFIX,local,DIRECT",
+		"DOMAIN-SUFFIX,lan,DIRECT",
+		"DOMAIN-SUFFIX,home.arpa,DIRECT",
+	}
+}
+
+// cnDNSDomains are the DoH/DoT hostnames of the public DNS services in mainland
+// China. They have to be reached directly for the same reason their IPs do:
+// resolving the resolver through the tunnel defeats the split.
+var cnDNSDomains = []string{"alidns.com", "doh.pub", "dot.pub", "360.cn", "onedns.net"}
+
 func routeRules(o options, egress string) []string {
-	if o.proxyMode == modeGlobal || o.proxyMode == modeDirect {
-		// Everything goes to the exit (global) or the core bypasses every rule
-		// (direct): neither has a rule set of its own.
+	if o.proxyMode == modeDirect {
+		// The core bypasses every rule in direct mode: no rule set of its own.
 		return nil
 	}
+	geo := geoDataReady()
 	var rules []string
+	if o.proxyMode == modeGlobal {
+		// Global keeps the LAN and the QUIC block; the MATCH fallback sends
+		// everything else to the exit.
+		rules = append(rules, quicBlockRuleAll)
+		return append(rules, privateRules()...)
+	}
+	if geo {
+		rules = append(rules, quicBlockRule)
+	}
 	if dnsLeakProtected(o) {
 		rules = append(rules, dnsServerRules(o, egress)...)
 	}
+	rules = append(rules, privateRules()...)
 	for _, d := range o.domainProxy {
 		rules = append(rules, "DOMAIN-SUFFIX,"+d+","+egress)
 	}
@@ -615,11 +663,17 @@ func routeRules(o options, egress string) []string {
 			rules = append(rules, "DOMAIN-SUFFIX,"+d+",DIRECT")
 		}
 	}
-	if o.proxyMode == modeBypass && geoDataReady() {
-		// Mainland sites and IPs straight out; everything else through the
-		// exit. Emitted only when the data is on disk: mihomo tries to
-		// download geosite.dat when it is missing and then refuses the whole
-		// config, which would read as "the client is broken".
+	if o.proxyMode == modeBypass && geo {
+		// The whitelist v2rayN ships, in mihomo syntax: Google first (some of
+		// its domains live in CN categories), then the CN DNS endpoints, then
+		// mainland domains and IPs, then everything else through the exit.
+		// Emitted only when the data is on disk: mihomo tries to download
+		// geosite.dat when it is missing and then refuses the whole config,
+		// which would read as "the client is broken".
+		rules = append(rules, "GEOSITE,google,"+egress)
+		for _, d := range cnDNSDomains {
+			rules = append(rules, "DOMAIN-SUFFIX,"+d+",DIRECT")
+		}
 		rules = append(rules,
 			"GEOSITE,cn,DIRECT",
 			// no-resolve: without it mihomo resolves the target just to test
