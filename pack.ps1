@@ -218,10 +218,27 @@ if ($topExes.Count -ne 1 -or $topExes[0].Name -ne 'xehn.exe') {
     throw "release must expose exactly one top-level program: xehn.exe"
 }
 
-# Zip it
+# Zip it. Compress-Archive opens every file without sharing, and a freshly
+# written 20 MB exe is often still being scanned by Defender at that moment:
+# retry a few times, then fall back to the .NET API, which opens read-only.
 $zip = Join-Path $dist "XEHN.$Version.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
-Compress-Archive -Path $root -DestinationPath $zip -CompressionLevel Optimal
+$zipped = $false
+for ($i = 1; $i -le 3 -and -not $zipped; $i++) {
+    try {
+        Compress-Archive -Path $root -DestinationPath $zip -CompressionLevel Optimal -ErrorAction Stop
+        $zipped = $true
+    } catch {
+        Write-Host ("compress attempt {0} failed: {1}" -f $i, $_.Exception.Message)
+        Start-Sleep -Seconds 3
+        if (Test-Path $zip) { Remove-Item $zip -Force -ErrorAction SilentlyContinue }
+    }
+}
+if (-not $zipped) {
+    Write-Host 'falling back to System.IO.Compression'
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::CreateFromDirectory($root, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+}
 
 # Verify the archive itself, not only the staging tree: this is the artifact
 # that leaves the machine.
