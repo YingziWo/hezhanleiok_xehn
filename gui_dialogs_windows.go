@@ -144,9 +144,21 @@ func (u *natUI) promptTextCheck(title, hint, value string, validate func(string)
 	_ = dlg.SetDefaultButton(ok)
 	_ = dlg.SetCancelButton(cancel)
 
+	// accepted holds exactly what validation approved. Returning le.Text()
+	// instead let the two disagree — an IME committing its composition while the
+	// dialog closes changes the control's text after the check — and the caller
+	// then saved a value the dialog had never validated ("5200 is not a number?").
+	accepted := value
 	submit := func() {
+		// Fold full-width digits and punctuation first: a Chinese IME produces
+		// "５２００", which looks identical to 5200 and fails every numeric parse.
+		txt := normalizeFieldInput(le.Text())
+		if txt != le.Text() {
+			_ = le.SetText(txt)
+			le.SetTextSelection(len([]rune(txt)), len([]rune(txt)))
+		}
 		if validate != nil {
-			if verr := validate(le.Text()); verr != nil {
+			if verr := validate(txt); verr != nil {
 				if errLabel != nil {
 					_ = errLabel.SetText("⚠ " + verr.Error())
 				}
@@ -154,6 +166,7 @@ func (u *natUI) promptTextCheck(title, hint, value string, validate func(string)
 				return
 			}
 		}
+		accepted = txt
 		dlg.Accept()
 	}
 	ok.Clicked().Attach(submit)
@@ -168,7 +181,35 @@ func (u *natUI) promptTextCheck(title, hint, value string, validate func(string)
 	if dlg.Run() != walk.DlgCmdOK {
 		return "", false
 	}
-	return le.Text(), true
+	return accepted, true
+}
+
+// normalizeFieldInput maps the characters a Chinese IME inserts onto their
+// ASCII twins. Full-width digits are the important case: they render exactly
+// like 5200, so "the port must be a number" reads as nonsense to the user who
+// just typed a number.
+func normalizeFieldInput(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r >= '\uFF10' && r <= '\uFF19': // ０-９
+			b.WriteRune('0' + (r - '\uFF10'))
+		case r == '\u3000': // ideographic space
+			b.WriteRune(' ')
+		case r == '\uFF0C' || r == '\u3001': // ，、
+			b.WriteRune(',')
+		case r == '\uFF0E': // ．
+			b.WriteRune('.')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // confirm shows a yes/no dialog. The OK button carries the affirmative answer so

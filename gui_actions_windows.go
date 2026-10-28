@@ -345,18 +345,28 @@ func (u *natUI) actionSetting(id string) {
 	if !ok {
 		return
 	}
-	if err := f.set(&u.m.set, strings.TrimSpace(v)); err != nil {
+	label, val := fieldTitle(id), strings.TrimSpace(v)
+	// Every outcome is reported on screen, not only in the log: the field may be
+	// scrolled out of view, and "I clicked OK and nothing happened" is the worst
+	// answer a settings dialog can give.
+	if err := f.set(&u.m.set, val); err != nil {
 		u.addLog(err.Error(), true)
+		u.infoDialog(tr("设置未保存"), err.Error(), []string{trf("输入：%s", val)})
 		return
 	}
 	if err := saveSettings(u.m.set); err != nil {
 		u.addLog(tr("设置保存失败: ")+err.Error(), true)
-	} else if u.m.connected {
+		u.infoDialog(tr("设置未保存"), tr("设置保存失败: ")+err.Error(), nil)
+		return
+	}
+	if u.m.connected {
 		u.m.setDirty = true
 	}
-	// Say what was saved: the field sits in a card that may be scrolled out of
-	// view, and "nothing happened" is the worst answer a settings dialog can give.
-	u.addLog(tr("已保存：")+fieldTitle(id)+" = "+strings.TrimSpace(v), false)
+	u.addLog(tr("已保存：")+label+" = "+val, false)
+	// Repaint first: the page should already show the new value when the user
+	// dismisses the confirmation.
+	u.invalidate()
+	u.infoDialog(tr("设置已保存"), label+" = "+val, []string{tr("重新连接后生效")})
 	if id == "set:picknode" {
 		// normalize may have cleared a pin that does not match the family.
 		if trimmed := strings.TrimSpace(v); trimmed != "" && u.m.set.Pin == "" {
