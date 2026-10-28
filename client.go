@@ -498,6 +498,23 @@ func renderClientConfig(opts options, ce cachedEndpoint, run protoRun) ([]byte, 
 		for _, s := range dns {
 			fmt.Fprintf(&b, "    - %s\n", s)
 		}
+		// Bypass mode splits resolution as well as traffic: CN domains are
+		// answered by a domestic resolver, directly. Without this every lookup —
+		// baidu.com included — is answered through the tunnel, which costs a
+		// round trip per domain and returns answers computed for an overseas
+		// client, so "direct" traffic still feels slow.
+		if opts.proxyMode == modeBypass && geoDataReady() {
+			cn, intl := domesticDNS(opts), foreignDNS(opts)
+			if cn != "" || intl != "" {
+				b.WriteString("  nameserver-policy:\n")
+				if cn != "" {
+					fmt.Fprintf(&b, "    \"geosite:cn\": %s\n", cn)
+				}
+				if intl != "" {
+					fmt.Fprintf(&b, "    \"geosite:geolocation-!cn\": %s\n", intl)
+				}
+			}
+		}
 		// An external DNS listener is only useful for TUN-mode hijack, and a
 		// fixed 5353 bind fails outright on hosts with reserved port ranges —
 		// mihomo's internal resolver works without it.
@@ -605,7 +622,11 @@ func routeRules(o options, egress string) []string {
 		// config, which would read as "the client is broken".
 		rules = append(rules,
 			"GEOSITE,cn,DIRECT",
-			"GEOIP,CN,DIRECT",
+			// no-resolve: without it mihomo resolves the target just to test
+			// GeoIP, and that lookup travels through the tunnel — the exact
+			// per-domain round trip this preset is supposed to avoid. GEOSITE
+			// already covers CN domains; this rule is for literal IPs.
+			"GEOIP,CN,DIRECT,no-resolve",
 			"GEOSITE,geolocation-!cn,"+egress)
 	}
 	return rules
@@ -635,6 +656,12 @@ func dnsServerRules(o options, egress string) []string {
 		if addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsUnspecified() {
 			target = "DIRECT"
 		}
+		// A domestic resolver has to stay reachable directly: bypass mode asks it
+		// for CN domains, and tunnelling that query is the slowness the preset
+		// exists to avoid.
+		if o.proxyMode == modeBypass && isDomesticResolver(addr.String()) {
+			target = "DIRECT"
+		}
 		if addr.Is6() {
 			rules = append(rules, "IP-CIDR6,"+addr.String()+"/128,"+target)
 		} else {
@@ -642,6 +669,53 @@ func dnsServerRules(o options, egress string) []string {
 		}
 	}
 	return rules
+}
+
+// domesticResolvers are the public DNS services inside mainland China. Only
+// these are trusted to answer CN lookups directly; everything else keeps
+// following the tunnel so foreign answers stay unpoisoned.
+var domesticResolvers = map[string]bool{
+	"223.5.5.5":         true,
+	"223.6.6.6":         true,
+	"119.29.29.29":      true,
+	"182.254.116.116":   true,
+	"114.114.114.114":   true,
+	"114.114.115.115":   true,
+	"180.76.76.76":      true,
+	"2400:3200::1":      true,
+	"2400:3200:baba::1": true,
+}
+
+func isDomesticResolver(s string) bool { return domesticResolvers[s] }
+
+// domesticDNS returns the first configured resolver that lives in mainland
+// China, or "" when the user configured only foreign ones (in which case there
+// is nothing to split with and the policy is skipped).
+func domesticDNS(o options) string {
+	for _, s := range confDNSList(o) {
+		if domesticResolvers[s] {
+			return s
+		}
+	}
+	return ""
+}
+
+// foreignDNS is the mirror image: the first configured resolver outside
+// mainland China, used for the domains this preset sends through the tunnel. A
+// CN resolver answers those with CN-optimised (and sometimes poisoned) results,
+// so the lookup has to travel with the traffic.
+func foreignDNS(o options) string {
+	for _, s := range confDNSList(o) {
+		addr, err := netip.ParseAddr(s)
+		if err != nil {
+			continue
+		}
+		if domesticResolvers[s] || addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() {
+			continue
+		}
+		return s
+	}
+	return ""
 }
 
 // geoDataReady reports whether the geo databases the rules need are on disk.

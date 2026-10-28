@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -250,5 +251,76 @@ func TestRenderCaptureAndFamily(t *testing.T) {
 				t.Errorf("%s: config unexpectedly contains %q\n%s", tc.name, w, cfg)
 			}
 		}
+	}
+}
+
+// TestRenderBypassSplitsDNS pins the fix for "bypass mainland is still slow":
+// the preset routed CN traffic direct but resolved every domain through the
+// tunnel, so each page paid a WARP round trip before the direct connection even
+// started. CN lookups must go to a domestic resolver, directly, and GEOIP must
+// not trigger a resolve of its own.
+func TestRenderBypassSplitsDNS(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WARP_CLIENT_HOME", home)
+	coreDirPath := filepath.Join(home, "core")
+	if err := os.MkdirAll(coreDirPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"geosite.dat", "geoip.metadb"} {
+		if err := os.WriteFile(filepath.Join(coreDirPath, n), make([]byte, 600*1024), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	render := func(dns string) string {
+		opts := options{
+			mixedPort: 7890,
+			apiPort:   9090,
+			mtu:       1280,
+			dns:       dns,
+			dnsLeak:   true,
+			proxyMode: modeBypass,
+		}
+		b, err := renderClientConfig(opts,
+			cachedEndpoint{Endpoint: "162.159.192.1:2408"},
+			protoRun{kind: kindWG, name: protoWG})
+		if err != nil {
+			t.Fatalf("renderClientConfig: %v", err)
+		}
+		return string(b)
+	}
+
+	cfg := render("223.5.5.5, 1.1.1.1")
+	for _, want := range []string{
+		"GEOSITE,cn,DIRECT",
+		"GEOIP,CN,DIRECT,no-resolve",         // never resolve just to test GeoIP
+		"IP-CIDR,223.5.5.5/32,DIRECT",        // domestic resolver stays off the tunnel
+		"IP-CIDR,1.1.1.1/32,WARP",            // foreign resolver still follows it
+		`"geosite:cn": 223.5.5.5`,            // CN domains resolved domestically
+		`"geosite:geolocation-!cn": 1.1.1.1`, // foreign domains resolved abroad
+	} {
+		if !strings.Contains(cfg, want) {
+			t.Errorf("bypass config missing %q\n%s", want, cfg)
+		}
+	}
+
+	// Foreign-only resolvers: the CN half of the split has nothing to use, so
+	// only the foreign half is emitted — silently inventing a domestic resolver
+	// would override the user's choice.
+	foreign := render("1.1.1.1, 8.8.8.8")
+	if !strings.Contains(foreign, `"geosite:geolocation-!cn": 1.1.1.1`) {
+		t.Errorf("foreign policy missing\n%s", foreign)
+	}
+	if strings.Contains(foreign, `"geosite:cn"`) {
+		t.Errorf("CN policy emitted without a domestic resolver\n%s", foreign)
+	}
+
+	// Without the databases the preset must stay inert rather than emit rules
+	// mihomo cannot load.
+	if err := os.Remove(filepath.Join(coreDirPath, "geosite.dat")); err != nil {
+		t.Fatal(err)
+	}
+	if noGeo := render("223.5.5.5, 1.1.1.1"); strings.Contains(noGeo, "GEOSITE,cn,DIRECT") {
+		t.Errorf("geo rules emitted without geodata\n%s", noGeo)
 	}
 }
