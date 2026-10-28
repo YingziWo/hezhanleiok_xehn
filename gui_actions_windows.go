@@ -57,10 +57,10 @@ func (u *natUI) actionPages(id string) {
 			return
 		}
 		// Bypass mainland is a ruleset over the geo databases; without them the
-		// core refuses the config, so picking it would disconnect the user. The
-		// popup already draws that row as unavailable.
+		// core refuses the whole config. Rather than leaving the row inert, the
+		// click fetches the databases and applies the preset when they land.
 		if v == modeBypass && !geoDataReady() {
-			u.invalidate()
+			u.startGeoDownload()
 			return
 		}
 		u.mutateSettings(func(s *clientSettings) { s.ProxyMode = v })
@@ -99,6 +99,39 @@ func (u *natUI) actionPages(id string) {
 	case strings.HasPrefix(id, "upd:"):
 		u.actionUpdate(id)
 	}
+}
+
+// startGeoDownload fetches the geo databases the bypass preset needs and then
+// applies it. Called on the GUI thread; the transfer runs off-thread and
+// reports through the log panel so a slow download is visible rather than
+// looking like a dead click.
+func (u *natUI) startGeoDownload() {
+	if u.m.geoBusy {
+		return
+	}
+	dir, err := coreDir()
+	if err != nil {
+		u.addLog(tr("无法定位核心目录: ")+err.Error(), true)
+		return
+	}
+	u.m.geoBusy = true
+	u.addLog(tr("缺少 Geo 数据，开始下载（约 13 MB）…"), false)
+	u.invalidate()
+	go func() {
+		derr := core.DownloadGeoData(u.ctx, dir, func(line string) {
+			u.sync(func() { u.addLog(line, false) })
+		})
+		u.sync(func() {
+			u.m.geoBusy = false
+			if derr != nil {
+				u.addLog(tr("Geo 数据下载失败: ")+derr.Error(), true)
+				u.invalidate()
+				return
+			}
+			u.addLog(tr("Geo 数据就绪，已启用「绕过大陆」"), false)
+			u.mutateSettings(func(s *clientSettings) { s.ProxyMode = modeBypass })
+		})
+	}()
 }
 
 // gotoPage switches pages. The start page is always Home, so nothing about the
@@ -321,6 +354,9 @@ func (u *natUI) actionSetting(id string) {
 	} else if u.m.connected {
 		u.m.setDirty = true
 	}
+	// Say what was saved: the field sits in a card that may be scrolled out of
+	// view, and "nothing happened" is the worst answer a settings dialog can give.
+	u.addLog(tr("已保存：")+fieldTitle(id)+" = "+strings.TrimSpace(v), false)
 	if id == "set:picknode" {
 		// normalize may have cleared a pin that does not match the family.
 		if trimmed := strings.TrimSpace(v); trimmed != "" && u.m.set.Pin == "" {

@@ -48,7 +48,9 @@ XEHN\
 │   ├── mihomo.exe        ← the Clash core — replace this file to update it
 │   ├── psiphon.exe       ← optional: Psiphon exit sidecar (GPL-3.0)
 │   ├── client.config     ← optional: official Psiphon credentials (needed with psiphon.exe)
-│   └── server_list.dat   ← optional: initial Psiphon server list
+│   ├── server_list.dat   ← optional: initial Psiphon server list
+│   ├── geosite.dat       ← geo data: needed by the "bypass mainland" preset
+│   └── geoip.metadb      ← geo data: same; missing files are downloaded on first use
 └── README.txt
 ```
 

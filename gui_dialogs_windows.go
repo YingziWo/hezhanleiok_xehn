@@ -159,6 +159,11 @@ func (u *natUI) promptTextCheck(title, hint, value string, validate func(string)
 	ok.Clicked().Attach(submit)
 	cancel.Clicked().Attach(func() { dlg.Cancel() })
 	le.SetFocus()
+	// Preselect the current value: typing then replaces it. Without this a user
+	// who types a new port appends to the old one ("7890" + "17890"), the
+	// validator rejects the result, and the dialog looks like it ignored the
+	// click because nothing on the page changed.
+	le.SetTextSelection(0, len([]rune(value)))
 
 	if dlg.Run() != walk.DlgCmdOK {
 		return "", false

@@ -155,6 +155,10 @@ type natModel struct {
 	// client back into service while the network is unreachable.
 	control     controlState
 	controlBusy bool
+
+	// geoBusy is true while the geo databases the bypass preset needs are
+	// downloading, so a second click cannot start a second transfer.
+	geoBusy bool
 }
 
 // natLog is one line of the log panel.

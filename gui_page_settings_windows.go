@@ -253,7 +253,7 @@ func presetHint(p string) string {
 	switch p {
 	case modeBypass:
 		if !geoDataReady() {
-			return tr("需要 geosite.dat 与 geoip.metadb：当前按自定义规则运行")
+			return tr("缺少 Geo 数据：点开「规则预设」选「绕过大陆」会自动下载")
 		}
 		return tr("国内站点与 IP 直连，其余流量走代理")
 	case modeBlacklist:
@@ -268,8 +268,8 @@ func presetHint(p string) string {
 }
 
 // paintPresetPopup lists the presets. Bypass mainland needs the geo databases;
-// its row is inert when they are missing instead of silently behaving like a
-// different preset.
+// when they are missing the row stays clickable and downloads them, because a
+// greyed-out row that only says "missing" leaves the user with nothing to do.
 func (u *natUI) paintPresetPopup(c *walk.Canvas, ax, ay, aw, ah float64) {
 	const (
 		rowH = 38.0
@@ -289,27 +289,25 @@ func (u *natUI) paintPresetPopup(c *walk.Canvas, ax, ay, aw, ah float64) {
 		ry := py + pad + float64(i)*rowH
 		id := "pickpreset:" + p
 		r := u.r(ax+6, ry, aw-12, rowH)
-		enabled := p != modeBypass || geo
-		if u.m.hover == id && enabled {
+		needsGeo := p == modeBypass && !geo
+		if u.m.hover == id {
 			u.fillRound(c, th.cardHover, r, ctrlRadius)
 		}
 		col := th.text
 		if cur == p {
 			col = th.accent
-		} else if !enabled {
-			col = th.faint
 		}
 		tw := aw - 40
-		if !enabled {
-			tw = aw - 130
+		if needsGeo {
+			tw = aw - 160
 		}
 		u.txt(c, ax+16, ry+9, tw, 20, presetLabel(p), u.f.f10, col)
-		if !enabled {
-			u.txt(c, ax+aw-110, ry+11, 94, 18, tr("缺少 Geo 数据"), u.f.f8, th.faint)
+		if needsGeo {
+			u.txt(c, ax+aw-150, ry+11, 134, 18, tr("缺少 Geo · 点击下载"), u.f.f8, th.accent)
 		} else if cur == p {
 			u.statusDot(c, ax+aw-24, ry+rowH/2, 3.5, th.accent)
 		}
-		u.addSpot(id, r, enabled)
+		u.addSpot(id, r, true)
 	}
 }
 

@@ -45,6 +45,8 @@
     psiphon.exe         (可选) Psiphon 出口组件 — 独立可执行文件 (GPL-3.0)
     client.config       (可选) Psiphon 官方凭据 — 与 psiphon.exe 成对必需
     server_list.dat     (可选) Psiphon 初始服务器列表
+    geosite.dat         Geo 数据 — 「绕过大陆」分流预设需要
+    geoip.metadb        Geo 数据 — 同上;缺失时首次使用会自动下载
   licenses\
     GPL-3.0.txt         GPL-3.0 许可证全文(mihomo 与 Psiphon 均为 GPL-3.0)
   THIRD_PARTY_NOTICES.md  第三方组件清单与再分发义务(再分发前请阅读)

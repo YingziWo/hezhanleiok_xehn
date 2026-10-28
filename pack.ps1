@@ -137,6 +137,20 @@ if ($MihomoPath -and (Test-Path $MihomoPath)) {
     Write-Host "no -MihomoPath given: core/ stays empty; the GUI offers one-click download"
 }
 
+# Geo databases: the "bypass mainland" preset renders GEOSITE,cn / GEOIP,CN,
+# and mihomo refuses a config that references geodata it cannot find. Bundling
+# them keeps that preset working on a machine that cannot reach GitHub; a
+# package without them downloads them on first use instead.
+foreach ($g in @('geosite.dat', 'geoip.metadb')) {
+    $gp = Join-Path $here "core\$g"
+    if (Test-Path $gp) {
+        Copy-Item $gp (Join-Path $root "core\$g") -Force
+        Write-Host ("bundled geo data: {0} ({1} MB)" -f $g, [math]::Round((Get-Item $gp).Length/1MB,1))
+    } else {
+        Write-Host "no core\${g}: the bypass preset will download it on first use"
+    }
+}
+
 # Psiphon exit sidecar (V1): bundled when present. Both the executable and the
 # official client config are required for `connect --psiphon` — the config carries
 # the SponsorId / PropagationChannelId / server-list URLs without which Psiphon

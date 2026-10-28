@@ -320,6 +320,13 @@ var enStrings = map[string]string{
 	"远程控制：客户端已停用，无法连接":      "Remote control: the client is stopped and cannot connect",
 	"远程控制：停用名单不可达（网络受限），沿用上次结果": "Remote control: stop list unreachable, keeping the previous verdict",
 	"远程控制：控制码正常":            "Remote control: control code is active",
+	"缺少 Geo · 点击下载":                  "No geo data · click to download",
+	"缺少 Geo 数据：点开「规则预设」选「绕过大陆」会自动下载": "Geo data missing: picking \u201cBypass mainland\u201d downloads it",
+	"缺少 Geo 数据，开始下载（约 13 MB）…":       "Geo data missing, downloading (~13 MB)…",
+	"Geo 数据就绪，已启用「绕过大陆」":            "Geo data ready; \u201cBypass mainland\u201d enabled",
+	"Geo 数据下载失败: ":                  "Geo data download failed: ",
+	"无法定位核心目录: ":                   "Cannot locate the core folder: ",
+	"已保存：":                         "Saved: ",
 	"远程控制状态保存失败":            "Could not save the remote-control state",
 	"本程序只在你自己的设备上配置一条加密隧道，不提供、不代理任何服务器资源；程序按「现状」提供，不对可用性、速度或适用性作任何承诺。": "This program only configures an encrypted tunnel on your own device and provides no server resources. It is offered as-is, with no promise of availability, speed or fitness for purpose.",
 

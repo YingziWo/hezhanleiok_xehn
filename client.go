@@ -647,23 +647,25 @@ func dnsServerRules(o options, egress string) []string {
 // geoDataReady reports whether the geo databases the rules need are on disk.
 // GEOSITE and GEOIP are separate files; requiring both is what keeps a half
 // installed database from failing the whole config at load time.
+//
+// The size floor matters: a failed download leaves a truncated file, and a
+// present-but-empty database fails the config exactly like a missing one —
+// only later, at connect time, with a much worse error message.
 func geoDataReady() bool {
 	dir, err := coreDir()
 	if err != nil {
 		return false
 	}
-	hasGeoSite := false
-	if _, err := os.Stat(filepath.Join(dir, "geosite.dat")); err == nil {
-		hasGeoSite = true
+	if core.GeoDataReady(dir) {
+		return true
 	}
-	hasGeoIP := false
-	for _, n := range []string{"geoip.metadb", "geoip.dat"} {
-		if _, err := os.Stat(filepath.Join(dir, n)); err == nil {
-			hasGeoIP = true
-			break
-		}
+	// Older installs may carry the legacy geoip.dat instead of geoip.metadb.
+	const floor = 512 * 1024
+	bigEnough := func(name string) bool {
+		fi, err := os.Stat(filepath.Join(dir, name))
+		return err == nil && fi.Size() >= floor
 	}
-	return hasGeoSite && hasGeoIP
+	return bigEnough("geosite.dat") && bigEnough("geoip.dat")
 }
 
 // dataPlaneSources are the URLs a data-plane probe proves itself with, tried in
