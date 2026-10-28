@@ -141,9 +141,12 @@ type natModel struct {
 
 	// set is the persisted preference file, kept in the model so every page
 	// renders straight from it.
-	set        clientSettings
-	setDirty   bool // a setting changed while connected: reconnect applies it
-	updLatest  string
+	set       clientSettings
+	setDirty  bool // a setting changed while connected: reconnect applies it
+	updLatest string
+	// updAvail is the version a completed check found to be newer; when it is
+	// set the update card's primary button installs it instead of checking.
+	updAvail   string
 	updChecked bool
 	updTime    time.Time
 	updBusy    bool
@@ -320,6 +323,12 @@ func runNativeGUI(ctx context.Context, _ options) error {
 	// user chose last time. Autostart is read back from the registry rather
 	// than trusted from the file: the registry is what actually launches the
 	// program, and a value removed by hand must not keep showing as "on".
+	// A leftover .new means an earlier update never finished; a leftover .old
+	// means it did and this is the new binary. Either way, clear them.
+	if exe, eerr := os.Executable(); eerr == nil {
+		cleanupUpdateLeftovers(exe)
+	}
+
 	u.m.set = loadSettings()
 	u.m.set.AutoStart = autoStartEnabled()
 	u.syncSessionFromSettings()

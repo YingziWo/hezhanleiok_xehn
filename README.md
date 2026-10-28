@@ -170,6 +170,15 @@ list keeps the previous verdict, so an offline laptop or a blocked GitHub never
 bricks a legitimate install, while the verdict is cached in `control-state.json`
 so a restart cannot quietly put a stopped client back into service.
 
+### Updating
+
+The About page checks `/releases/latest`; when a newer release exists its button
+becomes **Update to vX**. One click downloads the portable ZIP, checks that the
+program inside is a real PE image of plausible size, swaps it in place and
+restarts. The running image is renamed aside rather than overwritten — Windows
+forbids the latter — so a failed swap rolls back and leaves the current build
+working; the backup is cleared on the next start.
+
 ## Architecture
 
 ```

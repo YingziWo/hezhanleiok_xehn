@@ -465,7 +465,11 @@ func (u *natUI) paintAbout(c *walk.Canvas, x, y, w float64) {
 	u.kv(c, x, cy, half, tr("当前版本"), shortVersion())
 	u.kv(c, x, cy+24, half, tr("最新版本"), orEmpty(u.m.updLatest, tr("尚未检查")))
 	u.kv(c, x, cy+48, half, tr("状态"), orEmpty(u.m.updNote, tr("点击下方按钮检查更新")))
-	u.button(c, x+16, y2+140, bw, 34, "upd:check", tr("检查更新"), true, !u.m.updBusy)
+	updID, updLabel := "upd:check", tr("检查更新")
+	if u.m.updAvail != "" {
+		updID, updLabel = "upd:install", trf("立即更新到 v%s", u.m.updAvail)
+	}
+	u.button(c, x+16, y2+140, bw, 34, updID, updLabel, true, !u.m.updBusy)
 	u.button(c, x+16+bw+10, y2+140, bw, 34, "about:releases", tr("打开发布页"), false, true)
 
 	cy = u.card(c, rx, y2, half, aboutRow2H, tr("远程控制"))
