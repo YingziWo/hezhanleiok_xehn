@@ -179,6 +179,14 @@ restarts. The running image is renamed aside rather than overwritten — Windows
 forbids the latter — so a failed swap rolls back and leaves the current build
 working; the backup is cleared on the next start.
 
+### Tray
+
+Closing the window parks the client in the system tray instead of quitting — the
+tunnel and the system proxy stay up, which is the point of a VPN client.
+Left-click the tray icon to bring the window back, right-click for **Exit**.
+Launching the exe again raises the existing window rather than starting a second
+client, and the settings page's scrollbar can be dragged (it was wheel-only).
+
 ## Architecture
 
 ```

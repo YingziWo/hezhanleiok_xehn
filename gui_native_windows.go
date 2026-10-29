@@ -162,6 +162,11 @@ type natModel struct {
 	// geoBusy is true while the geo databases the bypass preset needs are
 	// downloading, so a second click cannot start a second transfer.
 	geoBusy bool
+
+	// scrollDrag is the settings scrollbar's grab state. The wheel alone was
+	// the only way to scroll that page, which is what users complained about.
+	scrollDrag   bool
+	scrollGrabDY float64 // pointer offset inside the thumb, design units
 }
 
 // natLog is one line of the log panel.
@@ -233,6 +238,18 @@ type natUI struct {
 	// racing on one cached verdict would let the slower (stale) answer win.
 	controlChecking atomic.Bool
 
+	// ni is the tray icon. Closing the window hides it there instead of
+	// quitting, so the tunnel keeps running; the close is only allowed once
+	// u.quitting is set from the tray menu.
+	ni         *walk.NotifyIcon
+	quitting   bool
+	trayHinted bool
+
+	// scrollDrag is the settings scrollbar's grab state: the wheel used to be
+	// the only way to scroll that page, which is what users complained about.
+	scrollDrag   bool
+	scrollGrabDY float64 // pointer offset inside the thumb, design units
+
 	// stateEpoch invalidates a status-loop tick that loaded state before a
 	// connect/disconnect/repair finished. Without it, an idle tick that was
 	// already probing the local network when a connect completed applied the
@@ -279,6 +296,14 @@ func (u *natUI) addSpot(id string, r walk.Rectangle, enabled bool) {
 func runNativeGUI(ctx context.Context, _ options) error {
 	redirectLogs()
 	enableDPIAwareness()
+
+	// Closing the window only hides it, so a second double-click would start a
+	// second client that fights this one for the mixed port and adds a second
+	// tray icon. One instance per desktop; a repeat launch just raises the
+	// existing window.
+	if !claimSingleInstance() {
+		return nil
+	}
 
 	mw, err := walk.NewMainWindow()
 	if err != nil {
@@ -408,7 +433,7 @@ func runNativeGUI(ctx context.Context, _ options) error {
 	})
 
 	cw.MouseDown().Attach(func(x, y int, _ walk.MouseButton) { u.onDown(x, y) })
-	cw.MouseMove().Attach(func(x, y int, _ walk.MouseButton) { u.onMove(x, y) })
+	cw.MouseMove().Attach(func(x, y int, b walk.MouseButton) { u.onMove(x, y, b) })
 	cw.MouseWheel().Attach(func(x, y int, b walk.MouseButton) { u.onWheel(x, y, b) })
 
 	go u.statusLoop()
@@ -417,7 +442,23 @@ func runNativeGUI(ctx context.Context, _ options) error {
 	u.reloadEndpoints(false) // fast cache read on the (main) GUI goroutine
 	u.refreshVPNGatePool()   // cached country list for the OpenVPN exit selector
 
+	// Closing the window parks it in the tray instead of quitting: the session
+	// keeps running, which is what a VPN client has to do. Only the tray menu's
+	// "exit" sets u.quitting and lets the close through.
+	mw.Closing().Attach(func(canceled *bool, _ walk.CloseReason) {
+		if u.quitting {
+			return
+		}
+		*canceled = true
+		mw.Hide()
+		if !u.trayHinted {
+			u.trayHinted = true
+			u.trayHint()
+		}
+	})
+
 	mw.Show()
+	u.initTray()
 	// The window owns its top edge: no OS caption, no title text, only the three
 	// buttons the page paints. Done after Show, because creating/showing the form
 	// applies walk's own window styles.
@@ -1766,6 +1807,10 @@ func (u *natUI) onDown(x, y int) {
 		return
 	}
 	if s, ok := u.hit(x, y); ok && s.enabled {
+		if s.id == "set:scrollbar" {
+			u.beginScrollDrag(y)
+			return
+		}
 		u.action(s.id)
 	}
 }
@@ -1818,7 +1863,17 @@ func (u *natUI) dropSpotOpen(id string) bool {
 	return false
 }
 
-func (u *natUI) onMove(x, y int) {
+func (u *natUI) onMove(x, y int, b walk.MouseButton) {
+	// Dragging the scrollbar owns the pointer until the button is released:
+	// walk reports the held button on every move, so no MouseUp hook is needed.
+	if u.scrollDrag {
+		if b == 0 {
+			u.scrollDrag = false
+		} else {
+			u.dragScrollTo(y)
+			return
+		}
+	}
 	if s, ok := u.hit(x, y); ok {
 		if u.m.hover != s.id {
 			u.m.hover = s.id

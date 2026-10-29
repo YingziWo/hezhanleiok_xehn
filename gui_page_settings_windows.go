@@ -67,6 +67,68 @@ func (u *natUI) paintSettings(c *walk.Canvas) {
 	u.paintSetScrollbar(c)
 }
 
+// scrollbarGeom returns the settings scrollbar in design units: the track's
+// top and height, the thumb's top and height. Paint and hit-testing both read
+// it, so the handle can never drift away from where it is drawn.
+func (u *natUI) scrollbarGeom() (trackTop, trackH, thumbTop, thumbH float64) {
+	trackTop = shellBodyY + 2
+	trackH = shellBodyH - 4
+	if u.m.setScrollMax <= 0 {
+		return trackTop, trackH, 0, 0
+	}
+	total := shellBodyH + float64(u.m.setScrollMax)
+	thumbH = trackH * shellBodyH / total
+	if thumbH < 42 {
+		thumbH = 42
+	}
+	off := float64(u.m.setScroll) / float64(u.m.setScrollMax)
+	thumbTop = trackTop + off*(trackH-thumbH)
+	return
+}
+
+// beginScrollDrag starts a drag on the settings scrollbar. Pressing the handle
+// keeps the pointer's offset inside it; pressing the track jumps the handle
+// there first, so a click means "go to this position" and a drag carries on
+// from that point.
+func (u *natUI) beginScrollDrag(py int) {
+	if u.m.setScrollMax <= 0 {
+		return
+	}
+	_, _, thumbTop, thumbH := u.scrollbarGeom()
+	y := u.uy(py) - capH
+	if y >= thumbTop && y <= thumbTop+thumbH {
+		u.scrollGrabDY = y - thumbTop
+	} else {
+		u.scrollGrabDY = thumbH / 2
+	}
+	u.scrollDrag = true
+	u.dragScrollTo(py)
+}
+
+// dragScrollTo maps the pointer's position on the track onto the scroll offset.
+func (u *natUI) dragScrollTo(py int) {
+	if u.m.setScrollMax <= 0 {
+		return
+	}
+	trackTop, trackH, _, thumbH := u.scrollbarGeom()
+	y := u.uy(py) - capH
+	top := y - u.scrollGrabDY
+	if top < trackTop {
+		top = trackTop
+	}
+	if maxTop := trackTop + trackH - thumbH; top > maxTop {
+		top = maxTop
+	}
+	span := trackH - thumbH
+	if span <= 0 {
+		u.m.setScroll = 0
+	} else {
+		u.m.setScroll = int((top - trackTop) / span * float64(u.m.setScrollMax))
+	}
+	u.clampSetScroll()
+	u.invalidate()
+}
+
 // paintSetScrollbar is the slim indicator on the outer margin. It only appears
 // when the column actually overflows, so the page does not look scrollable on a
 // tall window.
@@ -75,17 +137,12 @@ func (u *natUI) paintSetScrollbar(c *walk.Canvas) {
 		return
 	}
 	trackX := u.dw - 12
-	top := shellBodyY + 2
-	h := shellBodyH - 4
+	top, h, thumbY, thumbH := u.scrollbarGeom()
 	u.fillRound(c, mix(th.line, th.card, 0.45), u.r(trackX, top, 4, h), 2)
-	total := shellBodyH + float64(u.m.setScrollMax)
-	thumbH := h * shellBodyH / total
-	if thumbH < 42 {
-		thumbH = 42
-	}
-	off := float64(u.m.setScroll) / float64(u.m.setScrollMax)
-	thumbY := top + off*(h-thumbH)
 	u.fillRound(c, mix(th.accent, th.card, 0.28), u.r(trackX, thumbY, 4, thumbH), 2)
+	// A 4px bar is impossible to grab, so the clickable area is 18px wide and
+	// spans the whole track: click to jump, drag the handle to follow.
+	u.addSpot("set:scrollbar", u.r(trackX-7, top, 18, h), true)
 }
 
 // paintSetConnection holds the local proxy and the way the host is captured:
