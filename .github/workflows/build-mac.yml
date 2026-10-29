@@ -1,0 +1,44 @@
+name: Build mklogo for Mac
+
+on:
+  push:
+    branches: [ "main" ]  # 每次提交代码时触发
+  workflow_dispatch:      # 允许你在网页上手动点击按钮触发
+
+jobs:
+  build-mac:
+    name: Build Go Binary
+    runs-on: ubuntu-latest  # 使用 GitHub 免费的 Linux 虚拟机作为编译服务器
+    strategy:
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+            suffix: -mac-m1-m2-m3
+          - goos: darwin
+            goarch: amd64
+            suffix: -mac-intel
+          - goos: windows
+            goarch: amd64
+            suffix: .exe
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Build Binary
+      run: |
+        cd tools/mklogo
+        # 核心：通过环境变量指定目标系统(GOOS)和架构(GOARCH)进行交叉编译
+        GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -v -o mklogo${{ matrix.suffix }} main.go
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: mklogo-${{ matrix.goos }}-${{ matrix.goarch }}
+        path: tools/mklogo/mklogo${{ matrix.suffix }}
