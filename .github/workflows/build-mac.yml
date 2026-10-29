@@ -1,31 +1,15 @@
-name: Build Cross-Platform mklogo
+name: Build mklogo
 
 on:
   push:
+    branches: [ "main" ]  # 当 main 分支有代码推送时触发
+  pull_request:
     branches: [ "main" ]
-  workflow_dispatch: # 支持手动触发
+  workflow_dispatch:      # 允许你在 GitHub 网页上手动点击按钮触发编译
 
 jobs:
   build:
-    name: Build for ${{ matrix.goos }}-${{ matrix.goarch }}
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        # 在这里配置你需要的所有系统和架构
-        include:
-          - goos: windows
-            goarch: amd64
-            suffix: .exe
-          - goos: darwin
-            goarch: amd64
-            suffix: -mac-intel
-          - goos: darwin
-            goarch: arm64
-            suffix: -mac-m1
-          - goos: linux
-            goarch: amd64
-            suffix: -linux
-
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -33,16 +17,16 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.21'
+        go-version: '1.21' # 或者是你需要的 Go 版本
 
-    - name: Compile Binary
+    - name: Build mklogo
       run: |
+        # 因为 main.go 在 tools/mklogo 目录下，所以需要先切换目录再编译
         #cd tools/mklogo
-        # 使用矩阵变量进行交叉编译
-        GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -v -o mklogo${{ matrix.suffix }} main.go
+        go build -v -o mklogo-linux main.go
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: mklogo-${{ matrix.goos }}-${{ matrix.goarch }}
-        path: tools/mklogo/mklogo${{ matrix.suffix }}
+        name: mklogo-executable
+        path: tools/mklogo/mklogo-linux
