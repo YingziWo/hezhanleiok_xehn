@@ -3,7 +3,7 @@ name: Build Windows App XEHN
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch:      # 允许你在 GitHub 网页上直接点击按钮触发编译
+  workflow_dispatch:      # 允许手动触发
 
 jobs:
   build:
@@ -17,12 +17,12 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.21' # 使用稳定的 Go 版本进行编译
+        go-version: '1.21'
 
     - name: Build for Windows
       run: |
-        # 强制指定目标为 Windows 64位，并直接编译根目录的 main.go
-        GOOS=windows GOARCH=amd64 go build -v -o xehn-windows-amd64.exe main.go
+        # 注意最后是一个点「.」，代表编译整个目录，而不是单个 main.go
+        GOOS=windows GOARCH=amd64 go build -v -o xehn-windows-amd64.exe .
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
