@@ -3,6 +3,8 @@
 package main
 
 import (
+	"time"
+
 	"github.com/lxn/walk"
 )
 
@@ -75,17 +77,39 @@ func (u *natUI) trayHint() {
 	_ = u.ni.ShowInfo(tr("仍在后台运行"), tr("窗口已收进系统托盘，隧道保持连接；右键托盘图标可以退出。"))
 }
 
-// quitApp is the only path that really exits: it sets the flag the closing
-// handler checks, hides the icon and closes the window, after which the normal
-// teardown (proxy restore, core stop) runs.
-func (u *natUI) quitApp() {
+// quitApp is the tray menu's exit action.
+func (u *natUI) quitApp() { u.quitNow() }
+
+// quitNow is the only path that really exits: it sets the flag the closing
+// handler checks, drops the tray icon and closes the window, after which the
+// normal teardown (proxy restore, core stop) runs.
+//
+// The dispose and the close happen after this handler returns, on the next
+// turn of the GUI loop. Doing them inline deadlocked: Disposing the NotifyIcon
+// destroys the popup menu TrackPopupMenu is still pumping, that loop never
+// comes back, and the process stayed in Task Manager with no window and no
+// icon — exactly the reported "退出 didn't quit".
+func (u *natUI) quitNow() {
 	u.quitting = true
 	if u.ni != nil {
+		// Hide first: the shell drops the icon at once, so the click has a
+		// visible effect even if the teardown takes a moment.
 		_ = u.ni.SetVisible(false)
-		u.ni.Dispose()
-		u.ni = nil
 	}
-	if u.mw != nil {
-		u.mw.Close()
+	if u.quitScheduled {
+		return
 	}
+	u.quitScheduled = true
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		u.sync(func() {
+			if u.ni != nil {
+				u.ni.Dispose()
+				u.ni = nil
+			}
+			if u.mw != nil {
+				u.mw.Close()
+			}
+		})
+	}()
 }

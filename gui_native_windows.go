@@ -251,9 +251,10 @@ type natUI struct {
 	// ni is the tray icon. Closing the window hides it there instead of
 	// quitting, so the tunnel keeps running; the close is only allowed once
 	// u.quitting is set from the tray menu.
-	ni         *walk.NotifyIcon
-	quitting   bool
-	trayHinted bool
+	ni            *walk.NotifyIcon
+	quitting      bool
+	quitScheduled bool
+	trayHinted    bool
 
 	// scrollDrag is the settings scrollbar's grab state: the wheel used to be
 	// the only way to scroll that page, which is what users complained about.
@@ -517,7 +518,18 @@ func runNativeGUI(ctx context.Context, _ options) error {
 	// that just finished), so always run the disconnect cleanup: the system
 	// proxy must never outlive the window, and the elevated daemon (when in
 	// use) makes the restore silent. Safe on an already-disconnected machine.
-	_ = runDisconnectCmd(context.Background(), options{mixedPort: core.DefaultMixedPort})
+	// Bounded: a wedged core kill, or a proxy restore that falls back to the
+	// elevated helper and waits on a UAC prompt, must not keep a windowless
+	// process alive in Task Manager.
+	done := make(chan struct{})
+	go func() {
+		_ = runDisconnectCmd(context.Background(), options{mixedPort: core.DefaultMixedPort})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+	}
 	// Hand health ownership back: this window's claim must not outlive it, or
 	// every other process would keep standing aside for an owner that left.
 	releaseHealthOwner(os.Getpid())

@@ -299,9 +299,20 @@ func (u *natUI) actionSetting(id string) {
 
 	if v, ok := strings.CutPrefix(id, "set:capture:"); ok {
 		if v == captureTun && !core.IsElevated() {
-			// Stored anyway: the user may be configuring now and relaunching as
-			// administrator later. The card says why it will not connect yet.
-			u.addLog(tr("TUN 模式需要管理员权限：请以管理员身份重新运行本程序"), true)
+			// Stored first: the choice survives either answer, so a user who
+			// relaunches later gets the mode they picked.
+			toggle(func(s *clientSettings) { s.CaptureMode = v })
+			if u.confirm(tr("TUN 模式需要管理员权限"),
+				tr("现在以管理员身份重启程序？重启后 TUN 模式即可生效。")) {
+				if err := relaunchElevated(); err != nil {
+					u.addLog(tr("以管理员身份重启失败: ")+err.Error(), true)
+				} else {
+					u.quitNow()
+				}
+			} else {
+				u.addLog(tr("TUN 模式需要管理员权限：设置已保存，以管理员身份重新运行后生效"), true)
+			}
+			return
 		}
 		toggle(func(s *clientSettings) { s.CaptureMode = v })
 		return
