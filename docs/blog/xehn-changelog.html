@@ -1,0 +1,128 @@
+<!--
+  XEHN 1.0 系列 · 更新与修复说明（Blogger 正文，HTML 视图粘贴用）
+  发布前只需替换两个占位符：
+    {{DOWNLOAD_URL_1}}  → 下载地址一
+    {{DOWNLOAD_URL_2}}  → 下载地址二
+  全文无 script / 无外链样式表，只用内联样式，兼容 Blogger 编辑器。
+-->
+
+<div style="max-width:820px;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;font-size:16px;line-height:1.85;color:#232833;word-break:break-word;">
+
+  <p style="margin:0 0 18px;">XEHN 从 <strong>1.0</strong> 改名以来，一共发了三个版本（1.0.0 / 1.0.1 / 1.0.2）。这篇把这段时间里<strong>网友反馈的问题</strong>和对应的修复整理成一份清单，方便对号入座——如果你遇到过其中某一条，升级到最新版即可解决。</p>
+
+  <div style="background:#f5f8ff;border:1px solid #e1ebfb;border-radius:14px;padding:18px 22px;margin:0 0 26px;">
+    <p style="margin:0 0 10px;font-weight:600;color:#1b2233;">版本一览</p>
+    <table style="width:100%;border-collapse:collapse;font-size:14.5px;margin:0;">
+      <tbody>
+        <tr>
+          <td style="padding:8px 10px;border-bottom:1px solid #e1ebfb;font-weight:600;width:92px;">v1.0.0</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #e1ebfb;width:130px;color:#5b6478;">改名与分流基础</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #e1ebfb;color:#414a5e;">程序改名 xehn.exe、Geo 数据随包、DNS 跟着分流、规则对齐 v2rayN</td>
+        </tr>
+        <tr>
+          <td style="padding:8px 10px;border-bottom:1px solid #e1ebfb;font-weight:600;">v1.0.1</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #e1ebfb;color:#5b6478;">一键更新</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #e1ebfb;color:#414a5e;">关于页可以直接下载并安装新版本</td>
+        </tr>
+        <tr>
+          <td style="padding:8px 10px;font-weight:600;">v1.0.2</td>
+          <td style="padding:8px 10px;color:#5b6478;">托盘常驻</td>
+          <td style="padding:8px 10px;color:#414a5e;">关闭窗口不退出、设置页滚动条可拖</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 style="font-size:22px;line-height:1.5;margin:34px 0 14px;padding-left:12px;border-left:4px solid #2f6fed;color:#161b26;">一、分流与网络</h2>
+
+  <div style="border:1px solid #e6ecf5;border-radius:12px;padding:16px 20px;margin:0 0 16px;">
+    <p style="margin:0 0 6px;font-weight:600;color:#161b26;">1. 「绕过大陆」提示缺少 Geo 数据，点不了</p>
+    <p style="margin:0 0 6px;color:#5b6478;font-size:14px;">原因：这个预设要用 <code style="background:#f1f4f9;padding:1px 5px;border-radius:4px;font-size:13px;">geosite.dat</code> 和 <code style="background:#f1f4f9;padding:1px 5px;border-radius:4px;font-size:13px;">geoip.metadb</code> 两个规则库，而安装包里从来没有带过这两个文件。</p>
+    <p style="margin:0;color:#414a5e;">现在：<strong>安装包自带</strong>（约 12 MB），装完即可用；万一缺失，点「绕过大陆」会<strong>现场下载并自动应用</strong>。另外判断加了体积校验，下崩的半截文件不会被当成就绪。</p>
+  </div>
+
+  <div style="border:1px solid #e6ecf5;border-radius:12px;padding:16px 20px;margin:0 0 16px;">
+    <p style="margin:0 0 6px;font-weight:600;color:#161b26;">2. 选了「绕过大陆」，国内网站还是慢（关掉客户端反而快）</p>
+    <p style="margin:0 0 6px;color:#5b6478;font-size:14px;">原因：只分流了流量，<strong>没分流 DNS</strong>。客户端把配置的所有解析器地址都钉到了隧道出口，于是<strong>每个域名的解析都要先绕一趟 WARP</strong>，而且国内 DNS 是按「境外来源」给答案的。网页连得上，但每个新域名都要多几百毫秒。</p>
+    <p style="margin:0;color:#414a5e;">现在：DNS 也按规则分流——国内域名交给国内解析器（<strong>直连</strong>），国外域名交给国外解析器（走隧道）；判断 IP 归属不再触发额外的解析。</p>
+  </div>
+
+  <div style="border:1px solid #e6ecf5;border-radius:12px;padding:16px 20px;margin:0 0 16px;">
+    <p style="margin:0 0 6px;font-weight:600;color:#161b26;">3. 开着客户端访问路由器后台 / NAS / 打印机不通</p>
+    <p style="margin:0 0 6px;color:#5b6478;font-size:14px;">原因：规则里没有「局域网直连」，内网地址也被丢进隧道，而那边当然没有你的路由器。</p>
+    <p style="margin:0;color:#414a5e;">现在：<code style="background:#f1f4f9;padding:1px 5px;border-radius:4px;font-size:13px;">10/8</code>、<code style="background:#f1f4f9;padding:1px 5px;border-radius:4px;font-size:13px;">172.16/12</code>、<code style="background:#f1f4f9;padding:1px 5px;border-radius:4px;font-size:13px;">192.168/16</code>、<code style="background:#f1f4f9;padding:1px 5px;border-radius:4px;font-size:13px;">100.64/10</code>、<code style="background:#f1f4f9;padding:1px 5px;border-radius:4px;font-size:13px;">127/8</code> 以及 IPv6 内网段全部直连，<code style="background:#f1f4f9;padding:1px 5px;border-radius:4px;font-size:13px;">local</code> / <code style="background:#f1f4f9;padding:1px 5px;border-radius:4px;font-size:13px;">lan</code> / <code style="background:#f1f4f9;padding:1px 5px;border-radius:4px;font-size:13px;">home.arpa</code> 域名同理。</p>
+  </div>
+
+  <div style="border:1px solid #e6ecf5;border-radius:12px;padding:16px 20px;margin:0 0 16px;">
+    <p style="margin:0 0 6px;font-weight:600;color:#161b26;">4. 分流规则整体对齐 v2rayN 的「绕过大陆」白名单</p>
+    <p style="margin:0 0 6px;color:#5b6478;font-size:14px;">参考了 v2rayN 内置规则的八条内容，逐条移植：QUIC 处理、Google 优先代理、国内公共 DNS 的 IP 与域名直连、<code style="background:#f1f4f9;padding:1px 5px;border-radius:4px;font-size:13px;">geoip:cn</code> / <code style="background:#f1f4f9;padding:1px 5px;border-radius:4px;font-size:13px;">geosite:cn</code> 直连。</p>
+    <p style="margin:0;color:#414a5e;">其中 QUIC（UDP 443）比 v2rayN 更细一点：<strong>只拦境外</strong>，国内继续用 HTTP/3——B 站这类站点用 QUIC 是加速的，一刀切反而变慢。</p>
+  </div>
+
+  <h2 style="font-size:22px;line-height:1.5;margin:34px 0 14px;padding-left:12px;border-left:4px solid #2f6fed;color:#161b26;">二、设置与交互</h2>
+
+  <div style="border:1px solid #e6ecf5;border-radius:12px;padding:16px 20px;margin:0 0 16px;">
+    <p style="margin:0 0 6px;font-weight:600;color:#161b26;">5. 本地代理端口改成 5200，点确定没反应，日志却说「必须是数字」</p>
+    <p style="margin:0 0 6px;color:#5b6478;font-size:14px;">原因有两层：① 弹窗<strong>校验用的字符串和真正保存的不是同一个</strong>（关闭对话框时输入法会提交组合串，第二次读到的东西变了）；② 中文输入法打出的<strong>全角数字「５２００」</strong>看着和 5200 一样，但不是数字。</p>
+    <p style="margin:0;color:#414a5e;">现在：校验通过什么就保存什么，两者不可能再不一致；全角数字、全角逗号句号自动转半角；输入框打开即<strong>全选旧值</strong>，直接输入就是替换。</p>
+  </div>
+
+  <div style="border:1px solid #e6ecf5;border-radius:12px;padding:16px 20px;margin:0 0 16px;">
+    <p style="margin:0 0 6px;font-weight:600;color:#161b26;">6. 设置改完没有任何提示，不知道成功没有</p>
+    <p style="margin:0;color:#414a5e;">现在：成功弹「设置已保存：字段 = 值」，失败弹「设置未保存」并给出原因和<strong>你实际输入的内容</strong>，同时日志里也留一行记录。</p>
+  </div>
+
+  <div style="border:1px solid #e6ecf5;border-radius:12px;padding:16px 20px;margin:0 0 16px;">
+    <p style="margin:0 0 6px;font-weight:600;color:#161b26;">7. 设置页右边的滚动条拖不动，只能用滚轮</p>
+    <p style="margin:0 0 6px;color:#5b6478;font-size:14px;">原因：那条指示只有 4 像素宽，而且没有注册点击区域，鼠标根本抓不到。</p>
+    <p style="margin:0;color:#414a5e;">现在：可点区域 18 像素、覆盖整条轨道——按住拖动跟随鼠标，点空白处直接跳到该位置。</p>
+  </div>
+
+  <h2 style="font-size:22px;line-height:1.5;margin:34px 0 14px;padding-left:12px;border-left:4px solid #2f6fed;color:#161b26;">三、程序行为与更新</h2>
+
+  <div style="border:1px solid #e6ecf5;border-radius:12px;padding:16px 20px;margin:0 0 16px;">
+    <p style="margin:0 0 6px;font-weight:600;color:#161b26;">8. 点关闭窗口，程序直接退出（连接也跟着断了）</p>
+    <p style="margin:0 0 6px;color:#5b6478;font-size:14px;">原因：窗口关闭 = 进程退出，隧道和系统代理一起被拆掉，这对 VPN 客户端是最容易误伤的设计。</p>
+    <p style="margin:0;color:#414a5e;">现在：点 <strong>X 只是收进系统托盘</strong>，隧道保持；<strong>左键点托盘图标</strong>恢复窗口，<strong>右键 → 退出</strong>才真正结束。重复双击 exe 不会开第二个客户端，而是把已有窗口唤到前面。</p>
+  </div>
+
+  <div style="border:1px solid #e6ecf5;border-radius:12px;padding:16px 20px;margin:0 0 16px;">
+    <p style="margin:0 0 6px;font-weight:600;color:#161b26;">9. 「检查更新」只能提示，还得自己去下载</p>
+    <p style="margin:0;color:#414a5e;">现在：检查到新版本后按钮变成<strong>「立即更新到 vX」</strong>——自动下载、校验、就地替换并重启。替换失败会自动回滚，旧程序保持可用。</p>
+  </div>
+
+  <div style="border:1px solid #e6ecf5;border-radius:12px;padding:16px 20px;margin:0 0 16px;">
+    <p style="margin:0 0 6px;font-weight:600;color:#161b26;">10. 更新检查把「还没有发布版本」报成「网络不可达」</p>
+    <p style="margin:0;color:#414a5e;">现在：区分「仓库确实没有 Release」和「GitHub 真的连不上」，不再把前者甩锅给网络。</p>
+  </div>
+
+  <div style="border:1px solid #e6ecf5;border-radius:12px;padding:16px 20px;margin:0 0 16px;">
+    <p style="margin:0 0 6px;font-weight:600;color:#161b26;">11. 程序改名（1.0.0 起）</p>
+    <p style="margin:0;color:#414a5e;">主程序 <code style="background:#f1f4f9;padding:1px 5px;border-radius:4px;font-size:13px;">warp-client.exe</code> → <code style="background:#f1f4f9;padding:1px 5px;border-radius:4px;font-size:13px;">xehn.exe</code>，压缩包根目录 <code style="background:#f1f4f9;padding:1px 5px;border-radius:4px;font-size:13px;">XEHN\</code>，日志改为 <code style="background:#f1f4f9;padding:1px 5px;border-radius:4px;font-size:13px;">xehn.log</code>；版本号改为三段式，旧版本的更新检查才能识别到新版本。</p>
+  </div>
+
+  <h2 style="font-size:22px;line-height:1.5;margin:34px 0 14px;padding-left:12px;border-left:4px solid #2f6fed;color:#161b26;">四、怎么升级</h2>
+
+  <div style="background:#fff8e8;border:1px solid #f6e2b8;border-radius:14px;padding:18px 22px;margin:0 0 22px;">
+    <p style="margin:0 0 8px;color:#6b4d09;"><strong>1.0.1 及以上</strong>：打开「关于」→ 点「检查更新」→ 按钮变成「立即更新到 v1.0.2」→ 点一下，自动下载、替换、重启，设置都保留。</p>
+    <p style="margin:0;color:#6b4d09;"><strong>1.0.0 及更早</strong>：这一版还没有一键更新功能，需要手动下载一次压缩包，解压覆盖；旧的 <code style="background:#f6ecd2;padding:1px 5px;border-radius:4px;font-size:13px;">settings.json</code> 可以直接复制到新目录沿用。</p>
+  </div>
+
+  <h2 style="font-size:22px;line-height:1.5;margin:34px 0 14px;padding-left:12px;border-left:4px solid #2f6fed;color:#161b26;">五、下载</h2>
+
+  <div style="background:#eef4ff;border:1px solid #cfe0ff;border-radius:16px;padding:26px 22px;text-align:center;margin:0 0 20px;">
+    <p style="margin:0 0 6px;font-size:18px;font-weight:600;color:#161b26;">XEHN VPN Client · 便携版</p>
+    <p style="margin:0 0 20px;color:#5b6478;font-size:14px;">Windows 10 / 11 64 位 · 解压即用 · 不含任何账号数据</p>
+    <p style="margin:0 0 6px;">
+      <a href="{{DOWNLOAD_URL_1}}" target="_blank" rel="noopener" style="display:inline-block;padding:13px 30px;margin:6px;background:#2f6fed;color:#ffffff;border-radius:10px;text-decoration:none;font-weight:600;font-size:16px;">下载地址一</a>
+      <a href="{{DOWNLOAD_URL_2}}" target="_blank" rel="noopener" style="display:inline-block;padding:13px 30px;margin:6px;background:#ffffff;color:#2f6fed;border:1px solid #b9d2ff;border-radius:10px;text-decoration:none;font-weight:600;font-size:16px;">下载地址二</a>
+    </p>
+    <p style="margin:16px 0 0;font-size:14px;color:#5b6478;">GitHub 项目地址：<a href="https://github.com/hezhanleiok/xehn" target="_blank" rel="noopener" style="color:#2f6fed;text-decoration:none;font-weight:600;">github.com/hezhanleiok/xehn</a></p>
+  </div>
+
+  <div style="background:#fff8e8;border:1px solid #f6e2b8;border-radius:14px;padding:18px 22px;margin:0 0 10px;">
+    <p style="margin:0 0 8px;font-weight:600;color:#6b4d09;">声明</p>
+    <p style="margin:0;color:#6b4d09;font-size:15px;">本软件<strong>开源免费，仅供学习交流使用，禁止售卖！</strong>程序只在你自己的设备上配置一条加密隧道，不提供、不代理任何服务器资源。请遵守当地法律法规，自行承担使用风险。</p>
+  </div>
+
+</div>
