@@ -1,15 +1,15 @@
-name: Build mklogo
+name: Build Windows App XEHN
 
 on:
   push:
-    branches: [ "main" ]  # 当 main 分支有代码推送时触发
-  pull_request:
     branches: [ "main" ]
-  workflow_dispatch:      # 允许你在 GitHub 网页上手动点击按钮触发编译
+  workflow_dispatch:      # 允许你在 GitHub 网页上直接点击按钮触发编译
 
 jobs:
   build:
+    name: Build Windows Binary
     runs-on: ubuntu-latest
+    
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -17,16 +17,15 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.21' # 或者是你需要的 Go 版本
+        go-version: '1.21' # 使用稳定的 Go 版本进行编译
 
-    - name: Build mklogo
+    - name: Build for Windows
       run: |
-        # 因为 main.go 在 tools/mklogo 目录下，所以需要先切换目录再编译
-        #cd tools/mklogo
-        go build -v -o mklogo-linux main.go
+        # 强制指定目标为 Windows 64位，并直接编译根目录的 main.go
+        GOOS=windows GOARCH=amd64 go build -v -o xehn-windows-amd64.exe main.go
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: mklogo-executable
-        path: tools/mklogo/mklogo-linux
+        name: xehn-windows-program
+        path: xehn-windows-amd64.exe
