@@ -1172,6 +1172,12 @@ func startAndVerify(ctx context.Context, opts options, ce cachedEndpoint, run pr
 	defer cancel()
 	if err := c.WaitReady(waitCtx); err != nil {
 		_ = c.Stop()
+		// A crash carries an actionable cause; say it here rather than leaving
+		// the user with "not ready" five times in a row.
+		var crash *core.CrashError
+		if errors.As(err, &crash) {
+			stageMsg(fmt.Sprintf("[%s] %s", label, crash.Hint()))
+		}
 		return clientState{}, err
 	}
 	stageMsg(fmt.Sprintf("[%s] 隧道就绪，开始数据面验证…", label))

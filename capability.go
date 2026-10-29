@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -256,6 +257,30 @@ func probeCoreCapabilities(bin, workDir string) (version string, supported map[s
 			continue
 		}
 		ok, ran, terr := core.TestConfigDetail(bin, workDir, []byte(yaml))
+		// A crash is not an answer: the process died before it could parse the
+		// config, so it says nothing about whether this protocol works. Retry
+		// once (a scanner often injects only on first touch), then assume the
+		// protocol is fine and let the connect report the real problem — a probe
+		// that disables every protocol leaves the user with a client that
+		// refuses to connect for a reason it cannot name.
+		var crash *core.CrashError
+		if errors.As(terr, &crash) {
+			time.Sleep(250 * time.Millisecond)
+			ok2, ran2, terr2 := core.TestConfigDetail(bin, workDir, []byte(yaml))
+			var crash2 *core.CrashError
+			if ran2 && !errors.As(terr2, &crash2) {
+				supported[name] = ok2
+				if !ok2 && firstErr == nil {
+					firstErr = terr2
+				}
+				continue
+			}
+			supported[name] = true
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%v：%s", crash, crash.Hint())
+			}
+			continue
+		}
 		if !ran {
 			// The probe could not run at all (temp file unwritable, binary
 			// unexecutable, a scanner in the way). Assume the protocol is fine:

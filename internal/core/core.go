@@ -90,6 +90,11 @@ type Core struct {
 	cmd    *exec.Cmd
 	done   chan struct{}
 	cancel context.CancelFunc
+	// exitCode is how the child died (Windows exception codes are negative
+	// ints). WaitReady reads it so a crash is reported as a crash instead of
+	// "not ready within deadline".
+	exitCode  int
+	exitKnown bool
 }
 
 // New validates and prepares a Core. It does not start anything.
@@ -211,11 +216,18 @@ func (c *Core) Start() error {
 	c.cancel = cancel
 	c.done = make(chan struct{})
 	go func() {
-		_ = cmd.Wait()
-		close(c.done)
+		err := cmd.Wait()
 		c.mu.Lock()
+		if err != nil {
+			var ee *exec.ExitError
+			if errors.As(err, &ee) {
+				c.exitCode = ee.ExitCode()
+				c.exitKnown = true
+			}
+		}
 		c.cmd = nil
 		c.mu.Unlock()
+		close(c.done)
 	}()
 	return nil
 }
@@ -226,7 +238,17 @@ func (c *Core) WaitReady(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			if code, ok := c.CrashCode(); ok {
+				return &CrashError{Code: code}
+			}
 			return fmt.Errorf("core: not ready within deadline: %w", ctx.Err())
+		case <-c.done:
+			// The child exited before it ever answered. Say why: a crash code
+			// is a completely different problem from a config the core refused.
+			if code, ok := c.CrashCode(); ok {
+				return &CrashError{Code: code}
+			}
+			return fmt.Errorf("core: exited before it became ready")
 		default:
 		}
 		if pingController(base) {
@@ -234,6 +256,21 @@ func (c *Core) WaitReady(ctx context.Context) error {
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
+}
+
+// CrashCode reports the Windows exception code the core died with, if it died
+// on one (0xC0000005 and friends) rather than being stopped or exiting cleanly.
+func (c *Core) CrashCode() (uint32, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.exitKnown {
+		return 0, false
+	}
+	code := uint32(c.exitCode)
+	if code < 0xC0000000 {
+		return 0, false
+	}
+	return code, true
 }
 
 // Stop terminates the core process and waits for it to exit.

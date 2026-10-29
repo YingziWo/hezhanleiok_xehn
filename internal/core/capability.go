@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -72,6 +73,15 @@ func TestConfigDetail(bin, workDir string, configYAML []byte) (ok, ran bool, err
 	hideConsole(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		// A Windows exception code means the process died before it could say
+		// anything. That is an environment problem, not a rejected config, and
+		// the caller has to be able to tell the two apart.
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			if code := uint32(ee.ExitCode()); code >= 0xC0000000 {
+				return false, true, &CrashError{Code: code}
+			}
+		}
 		msg := strings.TrimSpace(string(out))
 		if i := strings.LastIndex(msg, "\n"); i >= 0 {
 			msg = msg[i+1:]
