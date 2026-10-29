@@ -37,7 +37,7 @@ jobs:
 
     - name: Compile Binary
       run: |
-        cd tools/mklogo
+        #cd tools/mklogo
         # 使用矩阵变量进行交叉编译
         GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -v -o mklogo${{ matrix.suffix }} main.go
 
