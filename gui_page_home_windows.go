@@ -117,11 +117,16 @@ func (u *natUI) paintConnectButton(c *walk.Canvas, cx, cy float64) {
 		u.arcW(c, th.accent, cx, cy, homeBtnR-30, 5, a, a+110)
 
 		label := tr("连接中…")
-		if u.m.connecting && !u.m.connectAt.IsZero() {
+		if u.m.connecting && !u.m.cancelling && !u.m.connectAt.IsZero() {
 			label = trf("连接中… %ds", int(time.Since(u.m.connectAt).Seconds()))
 		}
 		if u.m.working && !u.m.connecting {
 			label = tr("断开中…")
+		}
+		if u.m.cancelling {
+			// Between the click and the pipeline noticing it: say so, otherwise
+			// the seconds keep counting and the cancel looks ignored.
+			label = tr("正在取消…")
 		}
 		u.textC(c, label, u.f.f13b, th.accent, u.r(cx-110, cy+16, 220, 24))
 		if u.m.connecting && !u.m.connectAt.IsZero() {
@@ -145,7 +150,8 @@ func (u *natUI) paintConnectButton(c *walk.Canvas, cx, cy float64) {
 	}
 	// Hit area is the visible disc plus its rings, nothing else. It stays
 	// clickable while connecting: that click cancels the attempt.
-	u.addSpot("connect", u.r(cx-homeBtnR-10, cy-homeBtnR-10, (homeBtnR+10)*2, (homeBtnR+10)*2), !u.m.working || u.m.connecting)
+	u.addSpot("connect", u.r(cx-homeBtnR-10, cy-homeBtnR-10, (homeBtnR+10)*2, (homeBtnR+10)*2),
+		(!u.m.working || u.m.connecting) && !u.m.cancelling)
 }
 
 // ---------------------------------------------------------------------------

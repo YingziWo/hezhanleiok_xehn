@@ -92,6 +92,9 @@ type natModel struct {
 	scanAt    time.Time
 
 	connecting bool
+	// cancelling is true between the cancel click and the pipeline returning:
+	// the button says "正在取消…" instead of pretending to still connect.
+	cancelling bool
 	// connectAt is when the current attempt started: the button shows the
 	// elapsed seconds, which is what tells a user "it is still working" even
 	// between animation frames.
@@ -886,7 +889,13 @@ func (u *natUI) statusLoop() {
 			st.ExitIP, st.Country, st.Colo, st.NodeCity = exIP, cc, colo, city
 			u.m.status = st
 			u.m.proxyBlocker = blocker
-			u.m.connected = st.Connected
+			// While an attempt is in flight the pipeline owns this flag. A poll
+			// that read state.json before the cancel landed must not flip the
+			// button back to "已连接" afterwards — that is the "cancelled, then
+			// suddenly connected" report.
+			if !u.m.connecting && !u.m.cancelling && !u.m.working {
+				u.m.connected = st.Connected
+			}
 			if u.m.localLan == "" {
 				u.m.localLan = localLanIP()
 			}
@@ -1602,6 +1611,7 @@ func (u *natUI) doConnect() {
 	}
 	m.connecting = true
 	m.working = true
+	m.cancelling = false
 	u.connectAsync()
 }
 
@@ -1681,6 +1691,7 @@ func (u *natUI) connectAsync() {
 			u.stateEpoch.Add(1)
 			u.m.connecting = false
 			u.m.working = false
+			u.m.cancelling = false
 			u.m.connectAt = time.Time{}
 			// Reflect the outcome immediately: leaving connected untouched here
 			// let the button flash "connect" between the spinner stopping and
@@ -1694,10 +1705,22 @@ func (u *natUI) connectAsync() {
 			}
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
+					u.m.connected = false
+					u.m.spin = 0
 					u.addLog(tr("已取消连接"), false)
-				} else {
-					u.addLog(err.Error(), true)
+					u.invalidate()
+					// The attempt may have started a core before it noticed the
+					// cancellation: reap it and put the host proxy back, or the
+					// next connect finds the mixed port taken.
+					go func() {
+						if dir, derr := coreDir(); derr == nil {
+							core.KillStaleCores(core.CoreInDir(dir))
+						}
+						_ = runDisconnectCmd(context.Background(), options{mixedPort: core.DefaultMixedPort})
+					}()
+					return
 				}
+				u.addLog(err.Error(), true)
 			} else {
 				u.addLog("已连接", false)
 				if u.m.openvpn {
@@ -1730,19 +1753,14 @@ func (u *natUI) cancelConnect() {
 	}
 	u.connectCancel = nil
 	cancel()
+	u.m.cancelling = true
 	u.addLog(tr("正在取消连接…"), false)
-	go func() {
-		_ = runDisconnectCmd(context.Background(), options{mixedPort: core.DefaultMixedPort})
-		u.sync(func() {
-			u.stateEpoch.Add(1)
-			u.m.connecting = false
-			u.m.working = false
-			u.m.connected = false
-			u.m.connectAt = time.Time{}
-			u.m.spin = 0
-			u.invalidate()
-		})
-	}()
+	u.invalidate()
+	// Nothing else happens here on purpose. The pipeline returns at its next
+	// checkpoint and connectAsync's completion owns the cleanup; running the
+	// disconnect in parallel raced it — the pipeline could start its core right
+	// after the cleanup finished, and the attempt then reported success minutes
+	// after the user had cancelled.
 }
 
 func (u *natUI) doDisconnect() {

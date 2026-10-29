@@ -109,6 +109,18 @@ func proxyHelperAllowed() bool {
 // The system proxy is only touched AFTER the data plane is verified, so the
 // host is never pointed at a tunnel that does not pass traffic.
 func runConnectCmd(ctx context.Context, opts options) error {
+	err := runConnectInner(ctx, opts)
+	// The steps below report their own errors, and a step that dies because the
+	// context was cancelled usually wraps that into "registration failed: ...".
+	// The caller has to tell "the user cancelled" from "this failed", so the
+	// cancellation wins whenever it is the real reason.
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
+
+func runConnectInner(ctx context.Context, opts options) error {
 	if opts.mixedPort == 0 {
 		opts.mixedPort = core.DefaultMixedPort
 	}
@@ -409,6 +421,12 @@ func runConnectCmd(ctx context.Context, opts options) error {
 			return nil
 		}
 		lastErr = serr
+		// A cancelled attempt stops here: marking the endpoint dead or trying
+		// the next one would keep a session the user already abandoned alive,
+		// and the retry loop could still end up reporting success.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		fmt.Fprintln(os.Stderr, errPal.warn(fmt.Sprintf("endpoint %s: %v", ce.Endpoint, serr)))
 		markEndpointDead(opts, ce)
 		stageMsg(fmt.Sprintf("[%s] 端点 %s 已标记为 failed", label, ce.Endpoint))
@@ -739,6 +757,12 @@ func runConnectOpenVPN(ctx context.Context, opts options) error {
 			if tried >= openvpnMaxAttempts {
 				break
 			}
+			// A cancelled attempt must stop the retry loop here: without this
+			// the loop kept going, started core after core, and finally
+			// reported success for an attempt the user had already abandoned.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			tried++
 			node := relays[i]
 			opts.openvpnNode = &node
@@ -746,6 +770,9 @@ func runConnectOpenVPN(ctx context.Context, opts options) error {
 				label, ce.Endpoint, node.id(), node.CountryShort, tried, min(openvpnMaxAttempts, len(cands)*len(relays))))
 			state, serr := startAndVerify(ctx, opts, ce, run, bin, cDir, label, nil)
 			if serr != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				var slow *slowRelayError
 				if errors.As(serr, &slow) {
 					// The relay works; only its throughput is unusable. Keep it
@@ -1278,6 +1305,12 @@ func startAndVerify(ctx context.Context, opts options, ce cachedEndpoint, run pr
 	// TUN mode leaves the proxy untouched (the tun device routes everything),
 	// and -no-proxy skips the WinINET edit entirely (manual/headless setups
 	// point apps at the mixed port themselves).
+	// Last checkpoint: the tunnel is up and verified, but if the user cancelled
+	// while that was happening, pointing the host at it would be a session
+	// nobody asked for. Returning here leaves the core to the caller's cleanup.
+	if err := ctx.Err(); err != nil {
+		return clientState{}, err
+	}
 	if !opts.tunMode && !opts.noProxy {
 		stageMsg(fmt.Sprintf("[%s] 数据面验证通过，设置系统代理…", label))
 		snap, err := core.SetSystemProxy(opts.mixedPort)
