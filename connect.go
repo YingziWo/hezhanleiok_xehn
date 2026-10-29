@@ -769,6 +769,13 @@ func runConnectOpenVPN(ctx context.Context, opts options) error {
 					fmt.Fprintln(os.Stderr, errPal.warn("state not persisted: "+err.Error()))
 				}
 				stageMsg(fmt.Sprintf("[%s] 连接成功（出口 = VPN Gate %s）", label, node.CountryShort))
+				// Say it out loud when the session landed somewhere else: the
+				// region is a preference, so a fallback is legitimate — but a
+				// silent one looks like the selector is broken.
+				if opts.openvpnRegion != "" && !strings.EqualFold(node.CountryShort, opts.openvpnRegion) {
+					stageMsg(fmt.Sprintf("[%s] 注意：所选地区 %s 的节点都没连上，本次已改用 %s",
+						label, opts.openvpnRegion, node.CountryShort))
+				}
 				fmt.Fprintln(os.Stderr, errPal.ok(state.statusLine()))
 				if opts.tunMode {
 					fmt.Fprintln(os.Stderr, errPal.warn("TUN mode requires running with administrator rights"))

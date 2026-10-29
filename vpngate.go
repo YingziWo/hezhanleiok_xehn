@@ -1096,10 +1096,45 @@ func vpnGateCandidates(ctx context.Context, nodes []vpnGateNode, region, pin str
 		addAll(valid)
 	}
 	ordered = freshVPNGateNodes(ordered)
+	// Failure memory must never empty the country the user picked. Six relays
+	// that failed in the last ten minutes are not a reason to connect to another
+	// country behind the user's back: retry them first and say so. This is the
+	// "I chose the US and it went to Japan" report — every US relay had a recent
+	// failure, so the filter dropped them all and the last-good JP relay took
+	// the front of the list.
+	if targetCC != "" && !hasCountry(ordered, targetCC) {
+		if retry := nodesInCountry(valid, targetCC); len(retry) > 0 {
+			sortVPNGateNodesByLatency(retry)
+			stageMsg(fmt.Sprintf("所选地区（%s）的节点都在 %s 内失败过，仍优先重试该地区",
+				targetCC, vpnGateFailTTL))
+			ordered = append(retry, ordered...)
+		}
+	}
 	if max > 0 && len(ordered) > max {
 		ordered = ordered[:max]
 	}
 	return ordered
+}
+
+// hasCountry reports whether the list still has a relay in cc.
+func hasCountry(nodes []vpnGateNode, cc string) bool {
+	for _, n := range nodes {
+		if strings.EqualFold(n.CountryShort, cc) {
+			return true
+		}
+	}
+	return false
+}
+
+// nodesInCountry filters the pool by country, keeping the caller's order.
+func nodesInCountry(nodes []vpnGateNode, cc string) []vpnGateNode {
+	var out []vpnGateNode
+	for _, n := range nodes {
+		if strings.EqualFold(n.CountryShort, cc) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // ---- failure memory ----
@@ -1388,6 +1423,12 @@ func preferLastGoodVPNGate(relays []vpnGateNode, pin, region string) []vpnGateNo
 		return relays
 	}
 	if region != "" && !strings.EqualFold(last.Country, region) {
+		// A relay from another country is only promoted when the chosen region
+		// has nothing to offer at all. That is now the rare case: the candidate
+		// builder keeps the region's relays even when the failure memory has
+		// recently dropped them, so "empty" here means the pool genuinely has no
+		// node for that country — and connecting somewhere is better than
+		// failing outright, as long as connect.go says which country it used.
 		for _, n := range relays {
 			if strings.EqualFold(n.CountryShort, region) {
 				return relays
