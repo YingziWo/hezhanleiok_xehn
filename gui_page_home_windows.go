@@ -80,26 +80,57 @@ func (u *natUI) paintConnectButton(c *walk.Canvas, cx, cy float64) {
 		u.circleFill(c, mix(th.window, shadowTint(), f), cx, cy+7, r)
 	}
 	// The disc carries the state: frosted near-white while idle, the success
-	// colour once the tunnel is up. Same shape either way, so the change reads
-	// as "now connected" and not as a different control.
-	connected := u.m.connected && !u.m.connecting && !u.m.working
-	if connected {
+	// colour once the tunnel is up, an accent wash while connecting. Same shape
+	// either way, so the change reads as "now connected" and not as a different
+	// control.
+	connecting := u.m.connecting || u.m.working
+	connected := u.m.connected && !connecting
+	switch {
+	case connected:
 		u.radial(c, th.ok, mix(th.ok, rx(255, 255, 255), 0.34), cx, cy, homeBtnR)
 		u.circleStrokeW(c, mix(th.ok, rx(255, 255, 255), 0.45), cx, cy, homeBtnR-0.5, 1.0)
-	} else {
+	case connecting:
+		// A connecting button has to look busy from across the room. It used to
+		// keep the idle frosted fill while a thin dotted ring turned at 15°/s,
+		// which read as "nothing is happening". Now the disc itself takes the
+		// accent tint and the rim thickens, before any motion is noticed.
+		u.radial(c, mix(th.accent, rx(255, 255, 255), 0.92), mix(th.accent, rx(255, 255, 255), 0.74), cx, cy, homeBtnR)
+		u.circleStrokeW(c, mix(th.accent, rx(255, 255, 255), 0.30), cx, cy, homeBtnR-0.5, 1.4)
+	default:
 		// Bright at the centre, a touch cooler at the rim: frosted glass.
 		u.radial(c, th.connectTo, th.connectFrom, cx, cy, homeBtnR)
 		u.circleStrokeW(c, mix(th.card, th.accentLine, 0.7), cx, cy, homeBtnR-0.5, 1.0)
 	}
 
 	switch {
-	case u.m.connecting || u.m.working:
-		u.drawSpinner(c, cx, cy-14, homeBtnR-32, u.m.spin)
-		state := tr("连接中…")
-		if u.m.working && !u.m.connecting {
-			state = tr("断开中…")
+	case connecting:
+		// Breathing halo: two rings expanding outward and fading, half a period
+		// apart, so the button pulses even while a single step is slow.
+		phase := float64(u.m.spin%40) / 40.0
+		for i := 0; i < 2; i++ {
+			p := math.Mod(phase+float64(i)*0.5, 1.0)
+			u.circleStrokeW(c, mix(th.accent, th.window, 0.15+p*0.7), cx, cy, homeBtnR+3+p*14, 2.4*(1-p)+0.6)
 		}
-		u.textC(c, state, u.f.f13b, th.dim, u.r(cx-110, cy+16, 220, 24))
+		// Track plus a sweeping arc: 110° of accent turning once every ~2.4s.
+		u.circleStrokeW(c, mix(th.accent, rx(255, 255, 255), 0.78), cx, cy, homeBtnR-30, 5)
+		a := float64(u.m.spin * 9 % 360)
+		u.arcW(c, th.accent, cx, cy, homeBtnR-30, 5, a, a+110)
+
+		label := tr("连接中…")
+		if u.m.connecting && !u.m.connectAt.IsZero() {
+			label = trf("连接中… %ds", int(time.Since(u.m.connectAt).Seconds()))
+		}
+		if u.m.working && !u.m.connecting {
+			label = tr("断开中…")
+		}
+		u.textC(c, label, u.f.f13b, th.accent, u.r(cx-110, cy+16, 220, 24))
+		if u.m.connecting && !u.m.connectAt.IsZero() {
+			// The click cancels the attempt — say so, or the button reads as
+			// dead the moment it stops responding to "connect". Only shown
+			// while a pipeline is really running: during a protocol switch's
+			// disconnect phase there is nothing to cancel yet.
+			u.textC(c, tr("点此取消"), u.f.f9, th.dim, u.r(cx-110, cy+40, 220, 18))
+		}
 	case connected:
 		// White on the success fill: the glyph and the word have to stay legible
 		// against a colour instead of the frosted glass they were drawn for.
@@ -112,8 +143,9 @@ func (u *natUI) paintConnectButton(c *walk.Canvas, cx, cy float64) {
 		u.powerGlyph(c, cx, cy-14, 42, th.dim)
 		u.textC(c, tr("连接"), u.f.f16b, th.dim, u.r(cx-110, cy+12, 220, 28))
 	}
-	// Hit area is the visible disc plus its rings, nothing else.
-	u.addSpot("connect", u.r(cx-homeBtnR-10, cy-homeBtnR-10, (homeBtnR+10)*2, (homeBtnR+10)*2), !u.m.working)
+	// Hit area is the visible disc plus its rings, nothing else. It stays
+	// clickable while connecting: that click cancels the attempt.
+	u.addSpot("connect", u.r(cx-homeBtnR-10, cy-homeBtnR-10, (homeBtnR+10)*2, (homeBtnR+10)*2), !u.m.working || u.m.connecting)
 }
 
 // ---------------------------------------------------------------------------

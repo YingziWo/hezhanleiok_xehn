@@ -237,6 +237,9 @@ var enStrings = map[string]string{
 	"恢复默认设置？":        "Reset to defaults?",
 	"所有设置将回到初始值，需要重新连接才生效。": "Every setting returns to its initial value; reconnect to apply.",
 	"设置已保存":      "Saved",
+	"点此取消":       "click to cancel",
+	"已取消连接":      "Connect cancelled",
+	"正在取消连接…":    "Cancelling…",
 	"显示主窗口":      "Show window",
 	"退出":         "Exit",
 	"创建托盘图标失败: ": "Could not create the tray icon: ",
@@ -430,6 +433,7 @@ var enStrings = map[string]string{
 // trfKeys holds the parameterised strings. fmt verbs are part of the key, so
 // the translation can also reorder them (English may need the number first).
 var enFormats = map[string]string{
+	"连接中… %ds":  "Connecting… %ds",
 	"立即更新到 v%s": "Update to v%s",
 	"正在下载 v%s…": "Downloading v%s…",
 	"发现新版本 v%s，点「立即更新」直接安装": "v%s is available — press Update to install it",

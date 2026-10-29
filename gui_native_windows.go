@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -91,13 +92,17 @@ type natModel struct {
 	scanAt    time.Time
 
 	connecting bool
-	working    bool // true while a connect/disconnect goroutine is in flight
-	connected  bool
-	status     clientState
-	latency    int64 // live delay ms: through the tunnel, or direct when idle
-	samples    []int64
-	upRates    []int64 // live throughput samples, bytes/sec (upload)
-	downRates  []int64 // live throughput samples, bytes/sec (download)
+	// connectAt is when the current attempt started: the button shows the
+	// elapsed seconds, which is what tells a user "it is still working" even
+	// between animation frames.
+	connectAt time.Time
+	working   bool // true while a connect/disconnect goroutine is in flight
+	connected bool
+	status    clientState
+	latency   int64 // live delay ms: through the tunnel, or direct when idle
+	samples   []int64
+	upRates   []int64 // live throughput samples, bytes/sec (upload)
+	downRates []int64 // live throughput samples, bytes/sec (download)
 
 	// The machine's own coordinates, shown on the home tiles while no tunnel
 	// is up: the LAN address, and the public IP's country/city.
@@ -167,6 +172,11 @@ type natModel struct {
 	// the only way to scroll that page, which is what users complained about.
 	scrollDrag   bool
 	scrollGrabDY float64 // pointer offset inside the thumb, design units
+
+	// connectCancel stops the connect pipeline started by connectAsync. The
+	// button stays clickable while connecting, and that click has to do
+	// something rather than being swallowed.
+	connectCancel context.CancelFunc
 }
 
 // natLog is one line of the log panel.
@@ -249,6 +259,11 @@ type natUI struct {
 	// the only way to scroll that page, which is what users complained about.
 	scrollDrag   bool
 	scrollGrabDY float64 // pointer offset inside the thumb, design units
+
+	// connectCancel stops the connect pipeline started by connectAsync. The
+	// button stays clickable while connecting, and that click has to do
+	// something rather than being swallowed.
+	connectCancel context.CancelFunc
 
 	// stateEpoch invalidates a status-loop tick that loaded state before a
 	// connect/disconnect/repair finished. Without it, an idle tick that was
@@ -1334,6 +1349,9 @@ func (u *natUI) action(id string) {
 	switch {
 	case id == "connect":
 		if m.connecting {
+			// Cancelling is the only sensible meaning of the click while the
+			// pipeline runs; swallowing it made the button look dead.
+			u.cancelConnect()
 			return
 		}
 		if m.connected {
@@ -1581,6 +1599,11 @@ func (u *natUI) doConnect() {
 func (u *natUI) connectAsync() {
 	m := u.m
 	u.stateEpoch.Add(1)
+	m.connectAt = time.Now()
+	// The pipeline gets its own context so the button can cancel one attempt
+	// without touching the window's lifetime.
+	ctx, cancel := context.WithCancel(u.ctx)
+	u.connectCancel = cancel
 	u.persistSession()
 	o := defaultConnectOptions(m.proto, m.set.CaptureMode == captureTun, m.set.Rescan)
 	// Settings-page knobs ride on top of the session choices: ports, DNS,
@@ -1638,12 +1661,15 @@ func (u *natUI) connectAsync() {
 	go func() {
 		connectStage = u.connectStageHook
 		defer func() { connectStage = nil }()
-		err := runConnectCmd(u.ctx, o)
+		err := runConnectCmd(ctx, o)
 		_ = pw.Close()
+		cancel()
 		u.sync(func() {
+			u.connectCancel = nil
 			u.stateEpoch.Add(1)
 			u.m.connecting = false
 			u.m.working = false
+			u.m.connectAt = time.Time{}
 			// Reflect the outcome immediately: leaving connected untouched here
 			// let the button flash "connect" between the spinner stopping and
 			// the status loop's next 2s poll picking up the new state.
@@ -1655,7 +1681,11 @@ func (u *natUI) connectAsync() {
 				u.m.status = st
 			}
 			if err != nil {
-				u.addLog(err.Error(), true)
+				if errors.Is(err, context.Canceled) {
+					u.addLog(tr("已取消连接"), false)
+				} else {
+					u.addLog(err.Error(), true)
+				}
 			} else {
 				u.addLog("已连接", false)
 				if u.m.openvpn {
@@ -1676,6 +1706,31 @@ func (u *natUI) connectStageHook(s string) {
 		u.addLogStage(s)
 		u.invalidate()
 	})
+}
+
+// cancelConnect aborts an attempt that is still in flight. The pipeline notices
+// its context and returns; the disconnect cleanup runs alongside it so a core
+// that was already started does not outlive the cancelled attempt.
+func (u *natUI) cancelConnect() {
+	cancel := u.connectCancel
+	if cancel == nil {
+		return
+	}
+	u.connectCancel = nil
+	cancel()
+	u.addLog(tr("正在取消连接…"), false)
+	go func() {
+		_ = runDisconnectCmd(context.Background(), options{mixedPort: core.DefaultMixedPort})
+		u.sync(func() {
+			u.stateEpoch.Add(1)
+			u.m.connecting = false
+			u.m.working = false
+			u.m.connected = false
+			u.m.connectAt = time.Time{}
+			u.m.spin = 0
+			u.invalidate()
+		})
+	}()
 }
 
 func (u *natUI) doDisconnect() {
@@ -2025,27 +2080,6 @@ func (u *natUI) paint(c *walk.Canvas, _ walk.Rectangle) (err error) {
 func (u *natUI) measure(c *walk.Canvas, s string, f *walk.Font) int {
 	b, _, _ := c.MeasureTextPixels(s, f, walk.Rectangle{X: 0, Y: 0, Width: 10000, Height: 200}, walk.TextSingleLine|walk.TextNoPrefix)
 	return b.Width
-}
-
-func (u *natUI) drawSpinner(c *walk.Canvas, cx, cy, radius float64, phase int) {
-	for i := 0; i < 12; i++ {
-		ang := float64(phase)*0.9 + float64(i)*30.0
-		rad := ang * math.Pi / 180.0
-		cs, sn := math.Cos(rad), math.Sin(rad)
-		x1 := cx + cs*radius
-		y1 := cy + sn*radius
-		x2 := cx + cs*(radius-8)
-		y2 := cy + sn*(radius-8)
-		// Fade from the accent toward the panel colour so the arc appears to
-		// rotate on the light background.
-		t := float64(i) / 11.0
-		p := u.pen(rx(byte(245-t*186), byte(246-t*155), byte(249-t*30)))
-		if p == nil {
-			continue
-		}
-		_ = c.DrawLinePixels(p, u.p(x1, y1), u.p(x2, y2))
-		p.Dispose()
-	}
 }
 
 // speedText formats a bytes/sec rate for the traffic card.
