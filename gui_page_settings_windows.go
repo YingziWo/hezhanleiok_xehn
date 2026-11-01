@@ -397,7 +397,13 @@ func (u *natUI) paintSetExit(c *walk.Canvas, x, y, w float64) {
 		tr("不向隧道提供解析器，全部用系统 DNS"), s.DNSOff, true)
 
 	leakOK := !s.DNSOff && s.ProxyMode != modeDirect
-	leakSub := tr("解析请求经隧道发出；TUN 模式拦截全部 53 端口")
+	// The subtitle has to state the coverage, not just the mechanism: in system
+	// proxy mode only the programs that use the proxy are covered, and that
+	// distinction is what users keep asking about.
+	leakSub := tr("系统代理：走代理的程序解析经隧道，不走代理的仍会漏")
+	if s.CaptureMode == captureTun {
+		leakSub = tr("TUN：全机 53 端口被接管，任何程序都绕不过")
+	}
 	if s.DNSOff {
 		leakSub = tr("不下发 DNS 时使用系统解析，无法防泄露")
 	} else if s.ProxyMode == modeDirect {
@@ -519,7 +525,7 @@ func (u *natUI) paintAbout(c *walk.Canvas, x, y, w float64) {
 	// Row 2 — updates, and the remote-control identity this install carries.
 	y2 := row2
 	cy = u.card(c, x, y2, half, aboutRow2H, tr("客户端更新"))
-	u.kv(c, x, cy, half, tr("当前版本"), shortVersion())
+	u.kv(c, x, cy, half, tr("当前版本"), versionWithBuild())
 	u.kv(c, x, cy+24, half, tr("最新版本"), orEmpty(u.m.updLatest, tr("尚未检查")))
 	u.kv(c, x, cy+48, half, tr("状态"), orEmpty(u.m.updNote, tr("点击下方按钮检查更新")))
 	updID, updLabel := "upd:check", tr("检查更新")

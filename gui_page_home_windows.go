@@ -89,13 +89,6 @@ func (u *natUI) paintConnectButton(c *walk.Canvas, cx, cy float64) {
 	case connected:
 		u.radial(c, th.ok, mix(th.ok, rx(255, 255, 255), 0.34), cx, cy, homeBtnR)
 		u.circleStrokeW(c, mix(th.ok, rx(255, 255, 255), 0.45), cx, cy, homeBtnR-0.5, 1.0)
-	case connecting:
-		// A connecting button has to look busy from across the room. It used to
-		// keep the idle frosted fill while a thin dotted ring turned at 15°/s,
-		// which read as "nothing is happening". Now the disc itself takes the
-		// accent tint and the rim thickens, before any motion is noticed.
-		u.radial(c, mix(th.accent, rx(255, 255, 255), 0.92), mix(th.accent, rx(255, 255, 255), 0.74), cx, cy, homeBtnR)
-		u.circleStrokeW(c, mix(th.accent, rx(255, 255, 255), 0.30), cx, cy, homeBtnR-0.5, 1.4)
 	default:
 		// Bright at the centre, a touch cooler at the rim: frosted glass.
 		u.radial(c, th.connectTo, th.connectFrom, cx, cy, homeBtnR)
@@ -104,17 +97,18 @@ func (u *natUI) paintConnectButton(c *walk.Canvas, cx, cy float64) {
 
 	switch {
 	case connecting:
-		// Breathing halo: two rings expanding outward and fading, half a period
-		// apart, so the button pulses even while a single step is slow.
-		phase := float64(u.m.spin%40) / 40.0
-		for i := 0; i < 2; i++ {
-			p := math.Mod(phase+float64(i)*0.5, 1.0)
-			u.circleStrokeW(c, mix(th.accent, th.window, 0.15+p*0.7), cx, cy, homeBtnR+3+p*14, 2.4*(1-p)+0.6)
+		// Three dots breathing in sequence, in the power glyph's slot. No ring,
+		// no rotation: a rotating arc reads as a progress wheel that never
+		// arrives, while three dots say "working" without implying a position.
+		const dotGap = 13.0
+		for i := 0; i < 3; i++ {
+			// Each dot is a third of a cycle behind the previous one; the cosine
+			// gives a soft in-and-out rather than a blink.
+			phase := math.Mod(float64(u.m.spin)+float64(i)*8, 24) / 24
+			t := 0.5 - 0.5*math.Cos(2*math.Pi*phase)
+			col := mix(mix(th.accent, rx(255, 255, 255), 0.70), th.accent, t)
+			u.circleFill(c, col, cx-dotGap+float64(i)*dotGap, cy-14, 3.4+1.4*t)
 		}
-		// Track plus a sweeping arc: 110° of accent turning once every ~2.4s.
-		u.circleStrokeW(c, mix(th.accent, rx(255, 255, 255), 0.78), cx, cy, homeBtnR-30, 5)
-		a := float64(u.m.spin * 9 % 360)
-		u.arcW(c, th.accent, cx, cy, homeBtnR-30, 5, a, a+110)
 
 		label := tr("连接中…")
 		if u.m.connecting && !u.m.cancelling && !u.m.connectAt.IsZero() {
@@ -128,14 +122,7 @@ func (u *natUI) paintConnectButton(c *walk.Canvas, cx, cy float64) {
 			// the seconds keep counting and the cancel looks ignored.
 			label = tr("正在取消…")
 		}
-		u.textC(c, label, u.f.f13b, th.accent, u.r(cx-110, cy+16, 220, 24))
-		if u.m.connecting && !u.m.connectAt.IsZero() {
-			// The click cancels the attempt — say so, or the button reads as
-			// dead the moment it stops responding to "connect". Only shown
-			// while a pipeline is really running: during a protocol switch's
-			// disconnect phase there is nothing to cancel yet.
-			u.textC(c, tr("点此取消"), u.f.f9, th.dim, u.r(cx-110, cy+40, 220, 18))
-		}
+		u.textC(c, label, u.f.f13b, th.dim, u.r(cx-110, cy+16, 220, 24))
 	case connected:
 		// White on the success fill: the glyph and the word have to stay legible
 		// against a colour instead of the frosted glass they were drawn for.

@@ -258,6 +258,8 @@ type natUI struct {
 	quitting      bool
 	quitScheduled bool
 	trayHinted    bool
+	trayAttempts  int
+	trayFailed    bool
 
 	// scrollDrag is the settings scrollbar's grab state: the wheel used to be
 	// the only way to scroll that page, which is what users complained about.
@@ -374,6 +376,11 @@ func runNativeGUI(ctx context.Context, _ options) error {
 	}
 
 	u.m.set = loadSettings()
+	// A previous session that was killed from Task Manager (or crashed) never
+	// got to put WinINET back, and the browser then stays pointed at a port
+	// nobody listens on — the reported "no internet after quitting". Heal it
+	// before anything else can rely on the proxy state.
+	u.healStaleProxy()
 	u.m.set.AutoStart = autoStartEnabled()
 	u.syncSessionFromSettings()
 
@@ -468,6 +475,12 @@ func runNativeGUI(ctx context.Context, _ options) error {
 		if u.quitting {
 			return
 		}
+		if u.ni == nil || u.trayFailed {
+			// Without a tray icon there is no way back to a hidden window, so
+			// closing has to mean closing.
+			u.quitting = true
+			return
+		}
 		*canceled = true
 		mw.Hide()
 		if !u.trayHinted {
@@ -541,6 +554,31 @@ func runNativeGUI(ctx context.Context, _ options) error {
 	cw.Dispose()
 	mw.Dispose()
 	return nil
+}
+
+// healStaleProxy clears a WinINET proxy that still points at our mixed port
+// while nothing is listening on it. It is the startup half of the cleanup: the
+// exit path restores the proxy, and this catches the sessions that never reached
+// it (killed, crashed, or a restore that was blocked).
+func (u *natUI) healStaleProxy() {
+	port := u.m.set.MixedPort
+	if port <= 0 {
+		port = core.DefaultMixedPort
+	}
+	if !core.SystemProxyEnabledAt(port) {
+		return
+	}
+	// Only stale when nothing answers: a second instance or a live core would
+	// own this port, and clearing then would break a working session.
+	if conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond); err == nil {
+		_ = conn.Close()
+		return
+	}
+	if err := core.ClearSystemProxy(); err != nil {
+		u.addLog(tr("清理残留的系统代理失败: ")+err.Error(), true)
+		return
+	}
+	u.addLog(trf("已清理上次退出残留的系统代理（127.0.0.1:%d）", port), false)
 }
 
 func (u *natUI) disposeFonts() {
@@ -935,7 +973,9 @@ func (u *natUI) statusLoop() {
 }
 
 func (u *natUI) spinLoop() {
-	t := time.NewTicker(60 * time.Millisecond)
+	// 40ms (25fps) is the slowest rate at which a rotating arc still reads as
+	// smooth; the previous 60ms tick visibly stepped.
+	t := time.NewTicker(40 * time.Millisecond)
 	defer t.Stop()
 	for {
 		select {
@@ -1221,6 +1261,18 @@ func (u *natUI) protoOK(p string) bool {
 // result drives the protocol tiles (unsupported ones are visibly marked) and
 // the version line. Runs off the GUI thread; probeCoreCapabilities caches, so
 // repeat calls are cheap.
+// coreMissingHint explains a missing core in terms the user can act on: the
+// two causes look identical in a log line but need different fixes.
+func coreMissingHint(dir, bin string) string {
+	if _, err := os.Stat(dir); err != nil {
+		return tr("内核缺失：当前目录下没有 core 文件夹。请解压整个压缩包后再运行 xehn.exe（不要只把 exe 单独拿出来）。")
+	}
+	if fi, err := os.Stat(bin); err == nil && fi.Size() == 0 {
+		return tr("内核文件 core\\mihomo.exe 是 0 字节（下载或解压中断），请删掉它后用底栏「核心」按钮重新下载。")
+	}
+	return tr("内核缺失：core\\mihomo.exe 不存在。多数情况是被杀毒软件隔离，请把 XEHN 目录加入白名单后，用底栏「核心」按钮重新下载。")
+}
+
 func (u *natUI) probeCore() {
 	dir, err := coreDir()
 	if err != nil {
@@ -1228,8 +1280,15 @@ func (u *natUI) probeCore() {
 	}
 	u.sync(func() { u.refreshCoreCard(dir) })
 	bin := core.CoreInDir(dir)
-	if _, err := os.Stat(bin); err != nil {
-		return // not installed yet; doCore re-probes after the download
+	if fi, err := os.Stat(bin); err != nil || fi.Size() == 0 {
+		// Say which of the two very different problems this is. "Core missing"
+		// has two causes that need opposite fixes: the user ran the bare exe
+		// without the rest of the archive, or a security product removed
+		// mihomo.exe after extraction.
+		u.sync(func() {
+			u.addLog(coreMissingHint(dir, bin), true)
+		})
+		return
 	}
 	ver, supported, perr := probeCoreCapabilities(bin, dir)
 	u.sync(func() {
